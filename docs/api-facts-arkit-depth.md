@@ -58,7 +58,7 @@ worldEye = faceAnchor.transform * faceAnchor.leftEyeTransform
 
 | 方法 | 注释关键句 | 依据 |
 |---|---|---|
-| `- (simd_float4x4)viewMatrixForOrientation:(UIInterfaceOrientation)orientation;` | 「transform geometry **from world space into camera space** for a given orientation」 | `$AR/ARCamera.h:130-136` |
+| `- (simd_float4x4)viewMatrixForOrientation:(UIInterfaceOrientation)orientation;`<br>**Swift 实测为 `viewMatrix(for:)`** | 「transform geometry **from world space into camera space** for a given orientation」 | `$AR/ARCamera.h:130-136`；Swift 名由 Task 11 编译实测确认 |
 | `- (simd_float4x4)projectionMatrixForOrientation:viewportSize:zNear:zFar:` | — | `$AR/ARCamera.h:90-103` |
 | `- (CGPoint)projectPoint:orientation:viewportSize:` | 返回视口坐标，**原点在左上角** | `$AR/ARCamera.h:105-113` |
 | `intrinsics` (`simd_float3x3`) | `fx/fy` 像素焦距，`px/py` 主点，**原点在左上角像素中心** | `$AR/ARCamera.h:54-64` |
@@ -338,6 +338,14 @@ CFDictionaryRef CGImageSourceCopyAuxiliaryDataInfoAtIndex(
 **唯一机器验证过的 Swift 重命名**：`AVFoundation.apinotes:657` → `depthDataOutput(_:didOutput:timestamp:connection:)`。
 
 **实现时的规矩**：写下每个 Swift API 名之前，在 Xcode 里 Cmd-点进 generated interface 确认一次。编译器是唯一裁判。
+
+**已由编译实测确认的 Swift 拼写**（随实现推进持续补充）：
+
+| ObjC selector | Swift 实际拼写 | 确认于 |
+|---|---|---|
+| `viewMatrixForOrientation:` | **`viewMatrix(for:)`** | Task 11 探针实现，编译器报错后修正 |
+
+这条恰好印证了本节的规矩：按 ObjC selector 直译成 `viewMatrixForOrientation(_:)` 编译不过。
 
 ---
 
