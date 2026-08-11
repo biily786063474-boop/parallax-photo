@@ -27,7 +27,7 @@ struct OneEuroFilterTests {
         var f = OneEuroFilter(minCutoff: 1.0, beta: 0.0, derivativeCutoff: 1.0)
         var inputs: [Float] = []
         var outputs: [Float] = []
-        // 确定性的伪随机噪声，围绕 0 摆动
+        // 确定性的伪随机噪声，在 [0,1] 上均匀分布
         var seed: UInt64 = 42
         func nextNoise() -> Float {
             seed = seed &* 6364136223846793005 &+ 1442695040888963407
@@ -88,6 +88,36 @@ struct OneEuroFilterTests {
         #expect(abs(out.x - 1) < 1e-3)
         #expect(abs(out.y - 2) < 1e-3)
         #expect(abs(out.z - 3) < 1e-3)
+    }
+
+    @Test("beta 自适应确实在起作用")
+    func adaptiveBetaSpeedsUpFastMotion() {
+        // 同一个阶跃信号分别喂给 beta=0（退化成固定截止频率的低通）和高 beta 的滤波器。
+        // 高 beta 在快速变化时会把截止频率抬上去，因此应当明显更快追上目标。
+        //
+        // 这条测试守护的是这个滤波器存在的理由本身：
+        // 把 cutoff 里的 beta 项删掉，它必须变红。
+        var fixed = OneEuroFilter(minCutoff: 1.0, beta: 0.0, derivativeCutoff: 1.0)
+        var adaptive = OneEuroFilter(minCutoff: 1.0, beta: 50.0, derivativeCutoff: 1.0)
+
+        // 两者先各自稳定在 0
+        for i in 0..<30 {
+            let timestamp = TimeInterval(i) / 60.0
+            _ = fixed.filter(0, timestamp: timestamp)
+            _ = adaptive.filter(0, timestamp: timestamp)
+        }
+
+        // 阶跃到 1.0，只看之后的 10 步——这是自适应与否差别最大的窗口
+        var fixedOutput: Float = 0
+        var adaptiveOutput: Float = 0
+        for i in 30..<40 {
+            let timestamp = TimeInterval(i) / 60.0
+            fixedOutput = fixed.filter(1.0, timestamp: timestamp)
+            adaptiveOutput = adaptive.filter(1.0, timestamp: timestamp)
+        }
+
+        #expect(adaptiveOutput > fixedOutput + 0.05,
+                "高 beta 未能更快追上目标：adaptive=\(adaptiveOutput) vs fixed=\(fixedOutput)")
     }
 }
 
