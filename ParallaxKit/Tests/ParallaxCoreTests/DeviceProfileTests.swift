@@ -43,17 +43,46 @@ struct DeviceProfileTests {
         }
     }
 
+    @Test("摄像头偏移的符号必须正确")
+    func cameraOffsetSignsAreCorrect() {
+        // 这条守护的是最危险的一类错误：符号搞反不会让任何数值越界，
+        // 但会让离轴投影的窗口位置在每一帧都错，而且肉眼很难第一时间判断方向。
+        // 旁边的 cameraOffsetIsPlausible 用了 abs()，对符号完全免疫。
+        let iPhone = DeviceProfileRegistry.iPhone14ProMax
+        // 灵动岛在顶部，Y 轴向上，所以偏移为正；且它是屏内挖孔，必须落在显示区之内
+        #expect(iPhone.screen.cameraOffset.y > 0, "iPhone 摄像头应在屏幕中心上方")
+        #expect(iPhone.screen.cameraOffset.y < iPhone.screen.height / 2,
+                "iPhone 是屏内挖孔，不应落在显示区之外")
+
+        let iPad = DeviceProfileRegistry.iPadPro11M4
+        // M4 iPad Pro 把摄像头移到了长边，竖持时位于左侧边框上——在显示区之外
+        #expect(iPad.screen.cameraOffset.x < 0, "iPad 摄像头应在屏幕中心左侧")
+        #expect(abs(iPad.screen.cameraOffset.x) > iPad.screen.width / 2,
+                "iPad 摄像头在边框上，应落在显示区之外")
+        #expect(abs(iPad.screen.cameraOffset.y) < 1e-6, "iPad 摄像头应在长边中点，Y 偏移为零")
+    }
+
     @Test("标识符没有重复")
     func identifiersAreUnique() {
         let identifiers = DeviceProfileRegistry.all.map(\.identifier)
         #expect(Set(identifiers).count == identifiers.count, "设备表里有重复标识符")
     }
 
+    @Test("原生竖持方向下高必须大于宽")
+    func portraitHeightExceedsWidth() {
+        // 这条能抓住宽高转置——转置后两个值仍各自落在合理区间内，
+        // 只靠各自的上下界是发现不了的。
+        for profile in DeviceProfileRegistry.all + [DeviceProfileRegistry.fallback] {
+            #expect(profile.screen.height > profile.screen.width,
+                    "\(profile.identifier) 宽高疑似转置：\(profile.screen.width) x \(profile.screen.height)")
+        }
+    }
+
     @Test("尚未经真机校准的条目都标记为 false")
     func uncalibratedEntriesAreMarked() {
         // 探针 P11 跑完之前，表里不应该有任何条目自称已校准。
         // 这条测试会在 Task 12 回填真实数据时被有意改掉。
-        for profile in DeviceProfileRegistry.all {
+        for profile in DeviceProfileRegistry.all + [DeviceProfileRegistry.fallback] {
             #expect(profile.isCalibrated == false,
                     "\(profile.identifier) 声称已校准，但探针 P11 还没跑")
         }
