@@ -200,15 +200,27 @@ final class FaceProbe: NSObject, ARSessionDelegate {
             leftCameraX = leftPosition.x
             rightCameraX = rightPosition.x
         }
+        // P5：报告事实与判断规则，不替操作者下结论。
+        // ARKit 头文件对 leftEye/rightEyeTransform 的左右语义只字未提
+        // （只对 blendShapes 说明了镜像），所以这条探针是唯一能settle它的东西。
+        let blinkLeft = faceAnchor.blendShapes[.eyeBlinkLeft]?.floatValue ?? 0
+        let blinkRight = faceAnchor.blendShapes[.eyeBlinkRight]?.floatValue ?? 0
         report.set(
             "P5",
-            value: String(format: "leftEye.x=%.4f, rightEye.x=%.4f", leftCameraX, rightCameraX),
-            note: leftCameraX < rightCameraX
-                ? "leftEye 在相机空间偏左"
-                : "leftEye 在相机空间偏右（镜像语义，投影时须换向）"
+            value: String(
+                format: "leftEye.x=%+.4f  rightEye.x=%+.4f  |  眨眼 L=%.2f R=%.2f",
+                leftCameraX, rightCameraX, blinkLeft, blinkRight
+            ),
+            note: """
+            判断规则：前置摄像头面对你，摄像头的右手边对应你的左手边，\
+            所以你解剖学上的左眼应出现在相机空间的 +X 侧。
+            leftEye.x 为正 → leftEyeTransform 指你自己的左眼（无镜像）；
+            leftEye.x 为负 → 它按捕获图像的左右命名（镜像），投影时须换向。
+            交叉验证：闭上你的左眼，看 L / R 哪个数值涨上去。
+            """
         )
 
-        // P9：瞳距。成人正常范围 58–68 mm；若量出的是 58–68 说明单位是米。
+        // P9：瞳距。成人正常范围约 50–75 mm；若量出的是 0.050–0.075 说明单位是米。
         let distance = simd_length(leftPosition - rightPosition)
         guard distance.isFinite, distance > 0 else { return }
         pupillaryDistances.append(distance)
