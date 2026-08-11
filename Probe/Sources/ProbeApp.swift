@@ -13,6 +13,8 @@ struct ParallaxProbeApp: App {
 
 struct ProbeView: View {
     @State private var report = ProbeReport()
+    @State private var probe: FaceProbe?
+    @State private var isRunning = false
 
     var body: some View {
         NavigationStack {
@@ -33,6 +35,18 @@ struct ProbeView: View {
             }
             .navigationTitle("视差探针")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(isRunning ? "停止" : "开始") {
+                        if isRunning {
+                            probe?.stop()
+                        } else {
+                            let newProbe = FaceProbe(report: report)
+                            newProbe.start()
+                            probe = newProbe
+                        }
+                        isRunning.toggle()
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("复制") {
                         UIPasteboard.general.string = report.markdownTable()
