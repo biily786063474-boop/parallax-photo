@@ -6,3 +6,5 @@ xcuserdata/
 .swiftpm/
 .superpowers/
 .build/
+Probe/*.xcodeproj/
+Probe/Info.plist
