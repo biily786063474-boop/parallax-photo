@@ -1,0 +1,36 @@
+name: ParallaxProbe
+options:
+  bundleIdPrefix: com.biily.parallax
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+targets:
+  ParallaxProbe:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: ParallaxKit
+        product: ParallaxCore
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: 视差探针
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: >-
+          The front camera tracks your eye position on device so photos can shift
+          perspective as you move. Camera images are never saved or sent anywhere.
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # 探针是一次性测量工具，用 Swift 5 语言模式避免严格并发检查在这里
+        # 制造无谓摩擦（ARSessionDelegate 未标 @MainActor，ARSession 非 Sendable）。
+        # ParallaxCore 由 Package.swift 的 swift-tools-version: 6.0 决定，
+        # 仍然跑在 Swift 6 严格模式下——真正要长期维护的是它。
+        SWIFT_VERSION: "5.0"
+packages:
+  ParallaxKit:
+    path: ../ParallaxKit
