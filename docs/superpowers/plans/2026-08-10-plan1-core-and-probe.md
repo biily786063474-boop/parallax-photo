@@ -124,11 +124,35 @@ func coreHasNoPlatformImports() throws {
 
 - [ ] **Step 3: 跑测试确认它失败**
 
+> ⚠️ **这一步有个坑，不绕开就拿不到真正的 RED。**
+> `Package.swift` 的 `products` 数组引用了 `ParallaxCore` target，而此刻那个目录还是空的。
+> SwiftPM 会直接报 `target 'ParallaxCore' referenced in product 'ParallaxCore' is empty` 的
+> **构建错误**——测试根本不会运行。
+>
+> **构建错误不是测试失败。** 拿它当 RED，等于从没验证过这条测试有没有在测东西。
+
+先临时把 `products` 数组注释掉：
+
+```swift
+    // products: [
+    //     .library(name: "ParallaxCore", targets: ["ParallaxCore"])
+    // ],
+```
+
+然后跑：
+
 ```bash
 swift test --package-path ParallaxKit
 ```
 
-预期：**失败**。`Sources/ParallaxCore` 目录里没有任何 `.swift` 文件，`#expect(!swiftFiles.isEmpty)` 报「没找到任何源文件」。
+预期：**测试运行并失败**，输出里能看到：
+
+```
+✘ Test "ParallaxCore 不得依赖任何平台框架" recorded an issue at ArchitectureTests.swift:25
+  没找到任何源文件，说明路径推导错了：.../Sources/ParallaxCore
+```
+
+**必须亲眼看到这一行**，它证明测试确实在扫描目录、确实会因为扫不到东西而失败。看到之后再把 `products` 数组恢复。
 
 > 如果这一步意外通过了，说明路径推导写错了——停下来查，不要往下走。
 
