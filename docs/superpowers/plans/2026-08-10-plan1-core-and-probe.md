@@ -2531,8 +2531,22 @@ make probe-build
 
 - [ ] **Step 6: 提交**
 
+> ⚠️ **不要用 `git add Probe`。** `xcodegen generate` 会在 `Probe/` 下产出
+> `ParallaxProbe.xcodeproj/` 与 `Info.plist`，它们的每一个值都追溯回 `project.yml`，
+> 没有一个字是手写的。把生成物提交进去会抵消掉用 xcodegen 的全部意义，而且：
+> `make clean` 会删掉被 git 跟踪的文件；每次 `make probe` 都重写它们，让日后任何
+> 真实改动都埋在几百行生成 diff 里；`.pbxproj` 还嵌着 Xcode 版本号，换台机器就能
+> 产生一个 `project.yml` 一个字没改的 diff。
+>
+> 先在项目根 `.gitignore` 追加：
+>
+> ```
+> Probe/*.xcodeproj/
+> Probe/Info.plist
+> ```
+
 ```bash
-git add Probe Makefile
+git add .gitignore Probe/project.yml Probe/Sources Makefile
 git commit -m "feat(probe): 探针 app 工程脚手架
 
 xcodegen 生成，依赖 ParallaxCore。11 项测量结果可导出为 Markdown 表格
