@@ -82,13 +82,18 @@ struct DeviceProfileTests {
         }
     }
 
-    @Test("尚未经真机校准的条目都标记为 false")
-    func uncalibratedEntriesAreMarked() {
-        // 探针 P11 跑完之前，表里不应该有任何条目自称已校准。
-        // 这条测试会在 Task 12 回填真实数据时被有意改掉。
-        for profile in DeviceProfileRegistry.all + [DeviceProfileRegistry.fallback] {
-            #expect(profile.isCalibrated == false,
-                    "\(profile.identifier) 声称已校准，但探针 P11 还没跑")
+    @Test("校准标记必须与数据来源一致")
+    func calibrationFlagMatchesDataSource() {
+        // 这条闸门原本断言「全部条目未校准」，用于防止在拿到真实数据之前就伪造校准。
+        // 它在 iPad Pro 11 M4 拿到 Apple 官方工程图纸的 ±0.2mm 数据时如期变红——
+        // 那正是它该做的事。现在闸门收紧为两条：
+        //   1. 至少要有一个条目真的完成了校准（否则说明回填根本没发生）
+        //   2. 声称已校准的条目，摄像头偏移不能是零向量（零向量说明只是改了标记没填数据）
+        let calibrated = DeviceProfileRegistry.all.filter(\.isCalibrated)
+        #expect(!calibrated.isEmpty, "没有任何条目完成校准，回填未发生")
+        for profile in calibrated {
+            #expect(profile.screen.cameraOffset != .zero,
+                    "\(profile.identifier) 声称已校准，但摄像头偏移是零向量")
         }
     }
 }

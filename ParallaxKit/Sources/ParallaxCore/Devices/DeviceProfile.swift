@@ -38,46 +38,68 @@ public enum DeviceProfileRegistry {
         inches(pixels / ppi)
     }
 
-    /// iPhone 14 Pro Max — 2796x1290 @ 460ppi
+    /// iPhone 14 Pro Max
     ///
-    /// 摄像头偏移是**推算值**：灵动岛位于显示区顶部下方约 10mm 处，
-    /// 前置摄像头在灵动岛内偏右约 5mm。待探针 P11 实测校准。
+    /// **数据等级：显示区 A（图纸直读），摄像头偏移 C（图纸只给包络，X 无法确定）。**
+    /// 来源：<https://developer.apple.com/accessories/dimensional-drawings/> 的
+    /// `iphone-14-pro-max.pdf`。
+    ///
+    /// 图纸能确定的：
+    /// - PRODUCT WIDTH 77.58 mm，**DISPLAY ACTIVE AREA 71.21 mm**
+    /// - 「3.19 ALL AROUND: EXTERIOR OF HOUSING TO DISPLAY ACTIVE AREA」
+    ///   → 77.58 − 2×3.19 = 71.20 ≈ 71.21，**显示区严格居中于产品外形**
+    /// - 「2X 38.79」= 产品半宽 → **灵动岛在宽度方向严格居中**
+    /// - 灵动岛上缘距产品顶边 6.07 mm，包络宽 20.76 mm
+    ///
+    /// 图纸**不能**确定的：**摄像头在那 20.76 mm 包络里的横向位置**。
+    /// 灵动岛是「胶囊 + 圆点」两个开孔，圆点才是可见光摄像头，但图纸只画合并包络。
+    ///
+    /// 因此 x 取 **0**（居中）而非猜一个方向。理由是误差量级对比：
+    /// 填 0 的最大误差约 ±8mm；猜错方向则是 16mm，还外加「看起来像标定不准、
+    /// 实为系统性反向」这种最难排查的故障形态。
+    /// 另据 TechInsights 拆解，可见光摄像头的左右在 iPhone 13 一代翻过面
+    /// （X~12 在刘海右侧，13 起在左侧），按单一方向硬编码全系必然有一半是反的。
+    ///
+    /// y 由图纸 6.07（灵动岛上缘距产品顶边）− 3.19（显示区边距）+ 灵动岛半高估计
+    /// 推得摄像头距显示区顶边约 6.4mm。**含估算成分**，故 isCalibrated 仍为 false。
     public static let iPhone14ProMax = DeviceProfile(
         identifier: "iPhone15,3",
         displayName: "iPhone 14 Pro Max",
         screen: ScreenGeometry(
-            width: size(pixels: 1290, ppi: 460),
-            height: size(pixels: 2796, ppi: 460),
-            cameraOffset: SIMD3(
-                0.005,
-                size(pixels: 2796, ppi: 460) / 2 - 0.010,
-                0
-            )
+            width: 0.07121,
+            height: 0.15439,
+            cameraOffset: SIMD3(0, 0.15439 / 2 - 0.0064, 0)
         ),
         isCalibrated: false
     )
 
-    /// iPad Pro 11 英寸（M4）— 2420x1668 @ 264ppi
+    /// iPad Pro 11 英寸（M4）
     ///
-    /// **M4 iPad Pro 把前置摄像头移到了长边。** Apple 用户手册图注原文：
-    /// 「the front camera and microphone at the **center right**」——竖持正视图下
-    /// 位于**右侧**长边居中，因此 X 偏移为**正**、Y 偏移为零。
+    /// **数据等级 A：官方工程图纸直读，±0.2mm。**
+    /// 来源：<https://developer.apple.com/accessories/dimensional-drawings/> 的
+    /// `ipad-pro-11-inch-m4.pdf`（免登录可下），DETAIL F 与正视图纵坐标链。
     ///
-    /// ⚠️ 这里最初写成了左侧（X 为负），是凭「摄像头在长边」的印象推的方位，没查手册。
-    /// 一条测试只能保证代码符合你写下的断言，保证不了那个断言符合现实。
+    /// 图纸原始读数：
+    /// - 产品外形 249.70 × 177.51 mm
+    /// - DISPLAY ACTIVE AREA **232.32 × 160.13 mm**（注意：按 2420×1668 @264ppi 算是
+    ///   232.83 × 160.48，差 0.5mm。ppi 是取整值，**以图纸为准**）
+    /// - 前置器件距产品边 4.71 mm（图纸标 "8X 4.71"）
+    /// - FCAM 纵坐标 124.85 = 249.70/2，**正落在产品中心线上**
     ///
-    /// 偏移量 0.0845 m 的来源：Apple 公布机身宽度与显示区宽度之差得左右边框各 8.51mm，
-    /// 摄像头取边框中点估计。**这不是官方公布值**——Apple 从不公布摄像头坐标。
-    /// 不确定度约 ±4mm，在 40cm 观看距离下约合 0.6° 视差误差。
+    /// 摄像头偏移推导（显示区严格居中于产品外形，图纸四角边距相等已验证）：
+    /// - x = 177.51/2 − 4.71 = **84.045 mm**，在**右侧**长边
+    /// - y = 0（沿长边居中）
+    ///
+    /// 与 Apple 用户手册图注互证：「the front camera and microphone at the **center right**」。
     public static let iPadPro11M4 = DeviceProfile(
         identifier: "iPad16,4",
         displayName: "iPad Pro 11-inch (M4)",
         screen: ScreenGeometry(
-            width: size(pixels: 1668, ppi: 264),
-            height: size(pixels: 2420, ppi: 264),
-            cameraOffset: SIMD3(0.0845, 0, 0)
+            width: 0.16013,
+            height: 0.23232,
+            cameraOffset: SIMD3(0.084045, 0, 0)
         ),
-        isCalibrated: false
+        isCalibrated: true
     )
 
     /// 未知机型的保守默认值。

@@ -50,7 +50,17 @@ struct ProbeView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("复制") {
                         UIPasteboard.general.string = report.markdownTable()
+                        report.logSnapshot(reason: "manual")
                     }
+                }
+            }
+            // 每 2 秒把整张表打进系统日志，Mac 侧用 log stream 实时读。
+            // 操作者不必截图、不必手抄、不必点任何按钮——真机测量的数据
+            // 就是这个探针唯一的产物，取数不该成为一道额外的手工环节。
+            .task {
+                while !Task.isCancelled {
+                    report.logSnapshot(reason: "auto")
+                    try? await Task.sleep(for: .seconds(2))
                 }
             }
         }

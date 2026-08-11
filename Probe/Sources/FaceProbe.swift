@@ -19,6 +19,10 @@ final class FaceProbe: NSObject, ARSessionDelegate {
     // P9 用：累积瞳距样本
     private var pupillaryDistances: [Float] = []
 
+    // P13 用：最后一次拿到被追踪人脸的时刻。陈旧值和有效值长得一模一样，
+    // 不报新鲜度的话，追踪丢失后冻结的数字会被当成实测结果。
+    private var lastTrackedFaceTime: Date?
+
     init(report: ProbeReport) {
         self.report = report
         super.init()
@@ -106,6 +110,7 @@ final class FaceProbe: NSObject, ARSessionDelegate {
     // MARK: - ARSessionDelegate
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        measureOrientationAndFreshness()
         measureFrameRate(frame)
         measureCameraBasis(frame)
         measureCapturedDepth(frame)
@@ -123,6 +128,34 @@ final class FaceProbe: NSObject, ARSessionDelegate {
     }
 
     // MARK: - 各项测量
+
+    /// P13：界面方向与数据新鲜度。
+    ///
+    /// 方向是判读 P5/P12 轴向语义的前提——viewMatrix(for: .portrait) 给的是
+    /// 设备原生竖持方向的相机空间，横持时两眼连线会落到 Y 轴上。
+    /// 新鲜度则解决另一个陷阱：追踪丢失后各项测量会冻结在最后一次的值，
+    /// 而冻结值和有效值在界面上长得一模一样。
+    private func measureOrientationAndFreshness() {
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first
+        let interfaceName: String
+        switch scene?.interfaceOrientation {
+        case .portrait: interfaceName = "portrait（竖持，摄像头在原生顶边）"
+        case .portraitUpsideDown: interfaceName = "portraitUpsideDown"
+        case .landscapeLeft: interfaceName = "landscapeLeft（横持，原生顶边在左）"
+        case .landscapeRight: interfaceName = "landscapeRight（横持，原生顶边在右）"
+        default: interfaceName = "unknown"
+        }
+        let age = lastTrackedFaceTime.map { Date().timeIntervalSince($0) }
+        let ageText = age.map { String(format: "%.1fs 前", $0) } ?? "从未追踪到"
+        report.set(
+            "P13",
+            value: "界面方向 \(interfaceName)｜人脸数据 \(ageText)",
+            note: age.map { $0 > 1.0
+                ? "⚠️ 人脸数据已超过 1 秒未更新，P5/P6/P7/P9/P12 显示的是冻结的旧值，不可当作实测结果"
+                : "人脸数据新鲜，各项测量有效" } ?? "尚未检测到人脸，请正对屏幕"
+        )
+    }
 
     /// P3：didUpdateFrame 的实测频率
     private func measureFrameRate(_ frame: ARFrame) {
@@ -193,6 +226,7 @@ final class FaceProbe: NSObject, ARSessionDelegate {
     /// P5 与 P9：左右眼镜像关系与眼位单位
     private func measureEyes(_ faceAnchor: ARFaceAnchor) {
         guard faceAnchor.isTracked else { return }
+        lastTrackedFaceTime = Date()
 
         // 眼位 transform 是 anchor 局部空间，必须左乘 anchor.transform 才是世界坐标。
         // 见 docs/api-facts-arkit-depth.md §1.2
@@ -221,18 +255,27 @@ final class FaceProbe: NSObject, ARSessionDelegate {
         // （只对 blendShapes 说明了镜像），所以这条探针是唯一能settle它的东西。
         let blinkLeft = faceAnchor.blendShapes[.eyeBlinkLeft]?.floatValue ?? 0
         let blinkRight = faceAnchor.blendShapes[.eyeBlinkRight]?.floatValue ?? 0
+        // 只看 X 是不够的：设备横持时两眼连线落在 Y 轴上，X 差会缩到几毫米，
+        // 看上去像「两眼几乎重合」。所以报完整向量，让方向自己显形。
+        let leftCam = viewMatrix.map { $0 * SIMD4(leftPosition, 1) } ?? SIMD4(leftPosition, 1)
+        let rightCam = viewMatrix.map { $0 * SIMD4(rightPosition, 1) } ?? SIMD4(rightPosition, 1)
+        let separation = SIMD3(rightCam.x - leftCam.x, rightCam.y - leftCam.y, rightCam.z - leftCam.z)
+        let dominantAxis = abs(separation.x) >= abs(separation.y) ? "X" : "Y"
         report.set(
             "P5",
             value: String(
-                format: "leftEye.x=%+.4f  rightEye.x=%+.4f  |  眨眼 L=%.2f R=%.2f",
-                leftCameraX, rightCameraX, blinkLeft, blinkRight
+                format: "L(%+.4f,%+.4f,%+.4f) R(%+.4f,%+.4f,%+.4f) 连线Δ(%+.4f,%+.4f,%+.4f) 主轴=%@ 眨眼L=%.2f R=%.2f",
+                leftCam.x, leftCam.y, leftCam.z, rightCam.x, rightCam.y, rightCam.z,
+                separation.x, separation.y, separation.z, dominantAxis, blinkLeft, blinkRight
             ),
             note: """
-            判断规则：前置摄像头面对你，摄像头的右手边对应你的左手边，\
-            所以你解剖学上的左眼应出现在相机空间的 +X 侧。
-            leftEye.x 为正 → leftEyeTransform 指你自己的左眼（无镜像）；
-            leftEye.x 为负 → 它按捕获图像的左右命名（镜像），投影时须换向。
-            交叉验证：闭上你的左眼，看 L / R 哪个数值涨上去。
+            先看「主轴」：它是两眼连线在相机空间的主要方向。竖持时应为 X，横持时为 Y。\
+            连线Δ 的模长应接近 P9 的瞳距；若远小于它，说明设备方向与这里假定的 portrait 不一致。
+            判断规则（以主轴上的分量为准）：前置摄像头面对你，摄像头的右手边对应你的左手边，\
+            所以你解剖学上的左眼应落在主轴的正方向一侧。
+            连线Δ 主轴分量为正 → rightEyeTransform 在正方向 → left/right 按你自己的左右命名（无镜像）；
+            为负 → 按捕获图像的左右命名（镜像），投影时须换向。
+            交叉验证：闭上你的左眼，看 眨眼L / R 哪个数值涨上去。
             """
         )
 

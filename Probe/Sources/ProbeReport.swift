@@ -1,5 +1,15 @@
 import Foundation
 import Observation   // @Observable 宏来自这里，只 import Foundation 会编译失败
+import OSLog
+
+/// 探针日志。Mac 侧用下面这条命令实时读取，操作者不必截图或手抄：
+///
+///     log stream --device <UDID> --style compact \
+///       --predicate 'subsystem == "com.biily.parallax.ParallaxProbe"'
+///
+/// ⚠️ 所有插值都必须标 `privacy: .public`。os_log 默认把动态字符串打成 `<private>`，
+/// 不标的话读到的会是一堆尖括号——这是这类日志最常见的坑。
+let probeLogger = Logger(subsystem: "com.biily.parallax.ParallaxProbe", category: "probe")
 
 /// 一条探针测量结果。
 ///
@@ -18,7 +28,7 @@ struct ProbeMeasurement: Identifiable {
     }
 }
 
-/// 全部 12 项探针的测量结果。编号与 docs/api-facts-arkit-depth.md §6 一一对应。
+/// 全部 13 项探针的测量结果。编号与 docs/api-facts-arkit-depth.md §6 一一对应。
 @Observable
 final class ProbeReport {
     var measurements: [ProbeMeasurement] = [
@@ -33,7 +43,8 @@ final class ProbeReport {
         ProbeMeasurement(id: "P9", title: "眼位单位（实测瞳距）"),
         ProbeMeasurement(id: "P10", title: "capturedDepthData 类型与分辨率"),
         ProbeMeasurement(id: "P11", title: "设备标识符与屏幕参数"),
-        ProbeMeasurement(id: "P12", title: "双眼中点在相机空间的完整向量")
+        ProbeMeasurement(id: "P12", title: "双眼中点在相机空间的完整向量"),
+        ProbeMeasurement(id: "P13", title: "界面方向与数据新鲜度")
     ]
 
     func set(_ id: String, value: String, note: String = "") {
@@ -50,5 +61,30 @@ final class ProbeReport {
             lines.append("| \(m.id) | \(m.title) | \(m.value) | \(m.note) |")
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// 把当前全部测量打进系统日志，供 Mac 侧实时读取。
+    ///
+    /// 单行输出（而非多行表格）是有意的：`log stream` 每条记录一行，
+    /// 多行内容会被折叠得难以阅读，也不好用 grep 切。
+    /// note 里的换行统一压成 `⏎`，保证一项一行。
+    func logSnapshot(reason: String) {
+        var lines = ["SNAPSHOT-BEGIN \(reason)"]
+        for m in measurements {
+            let flatNote = m.note
+                .replacingOccurrences(of: "\n", with: "⏎")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            lines.append("\(m.id) | \(m.title) | \(m.value) | \(flatNote)")
+        }
+        lines.append("SNAPSHOT-END \(reason)")
+        let text = lines.joined(separator: "\n")
+
+        // 两条通道各有各的用处，都留着：
+        // print → stdout，由 `devicectl device process launch --console` 转发到 Mac 终端，
+        //          这是命令行取数的通道。必须 fflush，否则 stdout 缓冲会让数据迟迟不出来。
+        // Logger → 系统日志，Console.app 里能按 subsystem 过滤，事后回溯用。
+        print(text)
+        fflush(stdout)
+        probeLogger.info("\(text, privacy: .public)")
     }
 }
