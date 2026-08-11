@@ -1,0 +1,119 @@
+import Testing
+import simd
+@testable import ParallaxCore
+
+@Suite("OffAxisProjection")
+struct OffAxisProjectionTests {
+
+    static let screen = ScreenGeometry(
+        width: 0.07123, height: 0.15437, cameraOffset: .zero
+    )
+    static let near: Float = 0.01
+    static let far: Float = 10.0
+
+    /// 覆盖正前方、四个侧向偏移、远近距离的代表性眼位
+    static let eyePositions: [SIMD3<Float>] = [
+        SIMD3(0, 0, 0.30),
+        SIMD3(0.05, 0, 0.30),
+        SIMD3(-0.05, 0, 0.30),
+        SIMD3(0, 0.08, 0.30),
+        SIMD3(0, -0.08, 0.30),
+        SIMD3(0.04, -0.06, 0.22),
+        SIMD3(-0.03, 0.05, 0.55)
+    ]
+
+    private static func project(_ point: SIMD3<Float>, _ m: simd_float4x4) -> SIMD3<Float> {
+        let clip = m * SIMD4<Float>(point, 1)
+        return SIMD3(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w)
+    }
+
+    @Test("屏幕四角精确映射到 NDC 边界", arguments: eyePositions)
+    func screenCornersMapToNDCEdges(_ eye: SIMD3<Float>) {
+        let m = OffAxisProjection.matrix(
+            eye: eye, screen: Self.screen, near: Self.near, far: Self.far
+        )
+        let expectations: [(SIMD3<Float>, SIMD2<Float>)] = [
+            (Self.screen.bottomLeft,  SIMD2(-1, -1)),
+            (Self.screen.bottomRight, SIMD2( 1, -1)),
+            (Self.screen.topLeft,     SIMD2(-1,  1)),
+            (Self.screen.topRight,    SIMD2( 1,  1))
+        ]
+        for (corner, expected) in expectations {
+            let ndc = Self.project(corner, m)
+            #expect(abs(ndc.x - expected.x) < 1e-4,
+                    "眼位 \(eye) 下角点 \(corner) 的 NDC.x = \(ndc.x)，应为 \(expected.x)")
+            #expect(abs(ndc.y - expected.y) < 1e-4,
+                    "眼位 \(eye) 下角点 \(corner) 的 NDC.y = \(ndc.y)，应为 \(expected.y)")
+        }
+    }
+
+    @Test("眼位在正前方时退化为对称视锥")
+    func centeredEyeGivesSymmetricFrustum() {
+        let m = OffAxisProjection.matrix(
+            eye: SIMD3(0, 0, 0.3), screen: Self.screen, near: Self.near, far: Self.far
+        )
+        // 对称视锥的特征：第三列的 x、y 分量为 0（无偏斜）
+        #expect(abs(m.columns.2.x) < 1e-6)
+        #expect(abs(m.columns.2.y) < 1e-6)
+    }
+
+    @Test("眼位左移时屏幕中心向右偏")
+    func eyeMovingLeftShiftsCenterRight() {
+        let centered = OffAxisProjection.matrix(
+            eye: SIMD3(0, 0, 0.3), screen: Self.screen, near: Self.near, far: Self.far
+        )
+        let shifted = OffAxisProjection.matrix(
+            eye: SIMD3(-0.05, 0, 0.3), screen: Self.screen, near: Self.near, far: Self.far
+        )
+        let origin = SIMD3<Float>(0, 0, 0)
+        #expect(abs(Self.project(origin, centered).x) < 1e-5)
+        // 眼睛往左，屏幕中心相对视线就在右边
+        #expect(Self.project(origin, shifted).x > 0.01)
+    }
+
+    @Test("近平面映射到 0，远平面映射到 1（Metal 深度约定）")
+    func metalDepthRange() {
+        let eye = SIMD3<Float>(0, 0, 0.3)
+        let m = OffAxisProjection.matrix(
+            eye: eye, screen: Self.screen, near: Self.near, far: Self.far
+        )
+        // 眼前方 near 处与 far 处的点（屏幕坐标系中 Z 指向用户，故沿 -Z 远离）
+        let atNear = SIMD3(eye.x, eye.y, eye.z - Self.near)
+        let atFar = SIMD3(eye.x, eye.y, eye.z - Self.far)
+        #expect(abs(Self.project(atNear, m).z - 0) < 1e-4)
+        #expect(abs(Self.project(atFar, m).z - 1) < 1e-4)
+    }
+
+    @Test("屏幕平面上的点深度落在 [0,1] 内", arguments: eyePositions)
+    func screenPlaneDepthInRange(_ eye: SIMD3<Float>) {
+        let m = OffAxisProjection.matrix(
+            eye: eye, screen: Self.screen, near: Self.near, far: Self.far
+        )
+        let z = Self.project(SIMD3(0, 0, 0), m).z
+        #expect(z > 0 && z < 1, "屏幕平面深度 \(z) 落在 [0,1] 之外")
+    }
+
+    @Test("矩阵元素全部有限", arguments: eyePositions)
+    func matrixIsFinite(_ eye: SIMD3<Float>) {
+        let m = OffAxisProjection.matrix(
+            eye: eye, screen: Self.screen, near: Self.near, far: Self.far
+        )
+        for column in [m.columns.0, m.columns.1, m.columns.2, m.columns.3] {
+            for value in [column.x, column.y, column.z, column.w] {
+                #expect(value.isFinite, "矩阵含非有限值：\(value)")
+            }
+        }
+    }
+
+    @Test("眼位贴到屏幕平面上不产生 NaN")
+    func degenerateEyeDistanceIsSafe() {
+        let m = OffAxisProjection.matrix(
+            eye: SIMD3(0, 0, 0), screen: Self.screen, near: Self.near, far: Self.far
+        )
+        for column in [m.columns.0, m.columns.1, m.columns.2, m.columns.3] {
+            for value in [column.x, column.y, column.z, column.w] {
+                #expect(value.isFinite, "退化眼位产生了非有限值：\(value)")
+            }
+        }
+    }
+}
