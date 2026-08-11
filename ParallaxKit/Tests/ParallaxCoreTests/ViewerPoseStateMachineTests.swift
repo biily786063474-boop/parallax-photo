@@ -146,4 +146,61 @@ struct ViewerPoseStateMachineTests {
         let out = machine.update(Self.inputs(face: SIMD3(0.05, 0, 0.3)), now: 5)
         #expect(out.x.isFinite && out.y.isFinite && out.z.isFinite)
     }
+
+    @Test("过渡时长为零时立即落到目标，不会永久冻结")
+    func zeroTransitionDurationSnapsToTarget() {
+        // transitionDuration 是 public var，调用方可能为了"无动画/减弱动效"把它设成 0。
+        // 那时正确行为是直接落到目标，而不是卡在过渡起点再也出不来。
+        var machine = ViewerPoseStateMachine(transitionDuration: 0)
+        let motionPose = SIMD3<Float>(-0.07, -0.05, 0.42)
+        let facePose = SIMD3<Float>(0.08, 0.06, 0.28)
+
+        _ = machine.update(Self.inputs(motion: motionPose), now: 0)
+        let afterSwitch = machine.update(
+            Self.inputs(face: facePose, motion: motionPose), now: 0.1
+        )
+        #expect(machine.activeSource == .faceTracking)
+        #expect(simd_length(afterSwitch - facePose) < 1e-5,
+                "未落到目标，停在 \(afterSwitch)")
+
+        // 再喂若干帧，确认不是暂时现象
+        var latest = afterSwitch
+        for step in 1...10 {
+            latest = machine.update(
+                Self.inputs(face: facePose, motion: motionPose),
+                now: 0.1 + TimeInterval(step) * 0.1
+            )
+        }
+        #expect(simd_length(latest - facePose) < 1e-5, "输出被永久冻结在 \(latest)")
+    }
+
+    @Test("过渡中途时钟倒退不产生跳变，且仍能到达目标")
+    func backwardClockMidTransitionDoesNotJump() {
+        var machine = ViewerPoseStateMachine(transitionDuration: 0.3)
+        let target = SIMD3<Float>(0.09, 0.07, 0.25)
+
+        _ = machine.update(Self.inputs(), now: 0)
+        // 让过渡走到中途
+        var previous = machine.update(Self.inputs(face: target), now: 0.1)
+        for step in 1...6 {
+            previous = machine.update(
+                Self.inputs(face: target), now: 0.1 + TimeInterval(step) * 0.01
+            )
+        }
+
+        // 时钟退到过渡开始之前
+        let afterRewind = machine.update(Self.inputs(face: target), now: 0.05)
+        let jump = simd_length(afterRewind - previous)
+        #expect(jump < 0.02, "时钟倒退造成跳变 \(jump) 米")
+        #expect(afterRewind.x.isFinite && afterRewind.y.isFinite && afterRewind.z.isFinite)
+
+        // 时钟恢复正常后仍能走到目标
+        var latest = afterRewind
+        for step in 1...60 {
+            latest = machine.update(
+                Self.inputs(face: target), now: 0.05 + TimeInterval(step) * 0.02
+            )
+        }
+        #expect(simd_length(latest - target) < 1e-3, "倒退后无法到达目标，停在 \(latest)")
+    }
 }

@@ -43,14 +43,23 @@ public struct ViewerPoseStateMachine: Sendable {
 
         let output: SIMD3<Float>
         if let start = transitionStart, let startTime = transitionStartTime {
+            // 过渡时长非正 = 调用方显式禁用了过渡：直接落到目标，不留中间态。
+            // 注意必须清掉过渡状态，否则后续每帧都会重新进入这里，输出被永久冻结。
+            if transitionDuration <= 0 {
+                output = target
+                transitionStart = nil
+                transitionStartTime = nil
+                lastOutput = output
+                return output
+            }
             let elapsed = now - startTime
-            // 时间倒退或过渡时长非正：直接结束过渡，避免出现负进度。
-            if elapsed <= 0 || transitionDuration <= 0 {
-                output = elapsed < 0 ? target : start
-                if elapsed < 0 {
-                    transitionStart = nil
-                    transitionStartTime = nil
-                }
+            if elapsed < 0 {
+                // 时钟倒退。硬跳到目标、或退回过渡起点，都会重新制造这个状态机
+                // 存在的理由——那一跳。所以把锚点挪到当前输出、计时基准挪到当前时刻，
+                // 从这里重新走完剩下的路。
+                transitionStart = previousOutput
+                transitionStartTime = now
+                output = previousOutput
             } else if elapsed >= transitionDuration {
                 output = target
                 transitionStart = nil
