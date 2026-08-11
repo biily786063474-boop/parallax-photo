@@ -60,7 +60,7 @@ struct DeviceProfileTests {
         // 重新核对甚至改写——到时若断言与新数据冲突，那是「校准结果 vs 旧猜测」，
         // 不要把它当成回归。
         // M4 iPad Pro 把摄像头移到了长边，竖持时位于左侧边框上——在显示区之外
-        #expect(iPad.screen.cameraOffset.x < 0, "iPad 摄像头应在屏幕中心左侧")
+        #expect(iPad.screen.cameraOffset.x > 0, "iPad Pro M4 摄像头在右侧长边（Apple 手册：center right）")
         #expect(abs(iPad.screen.cameraOffset.x) > iPad.screen.width / 2,
                 "iPad 摄像头在边框上，应落在显示区之外")
         #expect(abs(iPad.screen.cameraOffset.y) < 1e-6, "iPad 摄像头应在长边中点，Y 偏移为零")

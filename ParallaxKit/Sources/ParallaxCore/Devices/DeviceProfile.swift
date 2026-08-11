@@ -59,20 +59,23 @@ public enum DeviceProfileRegistry {
 
     /// iPad Pro 11 英寸（M4）— 2420x1668 @ 264ppi
     ///
-    /// **M4 iPad Pro 把前置摄像头移到了长边**（横持时在顶部中央）。
-    /// 竖持（设备原生方向）时它位于左侧边中央，因此 X 偏移为负、Y 偏移为零。
-    /// 这不是一个可以套用 iPhone 逻辑的特例，待探针 P11 实测校准。
+    /// **M4 iPad Pro 把前置摄像头移到了长边。** Apple 用户手册图注原文：
+    /// 「the front camera and microphone at the **center right**」——竖持正视图下
+    /// 位于**右侧**长边居中，因此 X 偏移为**正**、Y 偏移为零。
+    ///
+    /// ⚠️ 这里最初写成了左侧（X 为负），是凭「摄像头在长边」的印象推的方位，没查手册。
+    /// 一条测试只能保证代码符合你写下的断言，保证不了那个断言符合现实。
+    ///
+    /// 偏移量 0.0845 m 的来源：Apple 公布机身宽度与显示区宽度之差得左右边框各 8.51mm，
+    /// 摄像头取边框中点估计。**这不是官方公布值**——Apple 从不公布摄像头坐标。
+    /// 不确定度约 ±4mm，在 40cm 观看距离下约合 0.6° 视差误差。
     public static let iPadPro11M4 = DeviceProfile(
         identifier: "iPad16,4",
         displayName: "iPad Pro 11-inch (M4)",
         screen: ScreenGeometry(
             width: size(pixels: 1668, ppi: 264),
             height: size(pixels: 2420, ppi: 264),
-            cameraOffset: SIMD3(
-                -(size(pixels: 1668, ppi: 264) / 2 + 0.006),
-                0,
-                0
-            )
+            cameraOffset: SIMD3(0.0845, 0, 0)
         ),
         isCalibrated: false
     )
