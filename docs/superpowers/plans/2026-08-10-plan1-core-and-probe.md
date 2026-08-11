@@ -18,6 +18,8 @@
 - 严格 TDD：**先写会失败的测试，跑一次确认它失败，再写实现。** 实现写在测试前面的，删掉重来。
 - **补写的测试必须证明自己能失败。** 当测试是在实现已存在之后补的（审查发现覆盖缺口、修 bug 时补回归测试），没有天然的 RED 阶段。这时必须临时把被测行为破坏掉，跑一次看它变红，再恢复，并把那次失败的输出写进报告。
   一条从未见过红色的测试，和一条什么都没测的测试，在证据上是同一回事。
+- **数值断言的边界要实测，不要估算。** 涉及浮点精度、饱和、收敛速度的断言（严格递增、容差阈值、迭代步数），先写个探针把实际数值打出来，按实测值定边界。
+  本计划已经因为凭理论估算边界而返工过：`tanh` 饱和点估的是 r≈0.525，实测 r≈0.52 起增量就归零；离轴投影里更是断言了一个数学上不可能成立的事。**估算出来的阈值是猜测，实测出来的才是事实。**
 - 每个 Task 结束必须提交，提交信息用中文描述做了什么。
 - 探针 app **不得**写入任何文件、不得联网。眼位数据只打印到控制台。
 
@@ -1017,14 +1019,33 @@ struct ParallaxBudgetTests {
         #expect(abs(ParallaxBudget.softClamp(r, linear: 0.06, max: 0.12) - r) < 1e-6)
     }
 
-    @Test("超出线性区后被压缩但仍单调递增")
+    @Test("超出线性区后被压缩，且在浮点可分辨范围内严格递增")
     func beyondLinearRegionIsCompressedAndMonotonic() {
+        // tanh 渐近饱和：过了某点，相邻步长带来的增量会落到 Float 精度以下，
+        // 输出停在上限不再变化——那是设计意图，不是缺陷。
+        // 实测在 max=0.12 时 r≈0.52 起增量就归零了（ULP(0.12)=7.45e-9）。
+        // 所以严格递增只在 r ≤ 0.40 内断言，那里增量仍有 ULP 的 55 倍余量。
         var previous = ParallaxBudget.softClamp(0.06, linear: 0.06, max: 0.12)
-        for step in 1...100 {
-            let r = 0.06 + Float(step) * 0.01
+        for step in 1...34 {
+            let r = 0.06 + Float(step) * 0.01   // 0.07 ... 0.40
             let out = ParallaxBudget.softClamp(r, linear: 0.06, max: 0.12)
-            #expect(out > previous, "在 r=\(r) 处不再单调递增")
+            #expect(out > previous, "在 r=\(r) 处不再严格递增")
             #expect(out < r, "在 r=\(r) 处没有被压缩")
+            previous = out
+        }
+    }
+
+    @Test("饱和区单调不减且永不越限")
+    func saturationRegionIsNonDecreasingAndBounded() {
+        // 饱和之后允许输出持平，但绝不允许回退或越界。
+        // 这条和上一条合起来才是完整的单调性契约：
+        // 可分辨区严格递增，饱和区不回退不越限。
+        var previous = ParallaxBudget.softClamp(0.40, linear: 0.06, max: 0.12)
+        for step in 1...100 {
+            let r = 0.40 + Float(step) * 0.05   // 0.45 ... 5.40
+            let out = ParallaxBudget.softClamp(r, linear: 0.06, max: 0.12)
+            #expect(out >= previous, "在 r=\(r) 处回退：\(out) < \(previous)")
+            #expect(out <= 0.12 + 1e-6, "在 r=\(r) 处越限：\(out)")
             previous = out
         }
     }
@@ -1645,6 +1666,9 @@ git commit -m "feat(core): 空闲自动摆动生成器
   - `struct ViewerPoseStateMachine: Sendable` — `init(transitionDuration: TimeInterval = 0.3)`；`private(set) var activeSource: ViewerPoseSourceKind`；`mutating func update(_ inputs: ViewerPoseInputs, now: TimeInterval) -> SIMD3<Float>`
 
 > **过渡的起点必须是上一次的输出值，不是上一个源的当前值。** 这是保证连续的关键：源切换时上一个源可能已经完全不可用（比如脸移出画面），拿它的最后一个值当起点会跳。
+>
+> **关于 0.02 这个跳变阈值的来源**：两个源之间最远约 0.23m（`rapidFlappingStaysBounded` 里的 face 与 motion），过渡 300ms、按 120fps 采样共 36 帧，smoothstep 的峰值斜率是 1.5，所以单帧位移上限是 `0.23 × 1.5 / 36 ≈ 0.0097`。阈值取它的两倍留余量。
+> 它依然能抓住真正的问题：瞬切会产生一次约 0.23m 的跳变，比阈值大一个数量级。
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -1703,7 +1727,7 @@ struct ViewerPoseStateMachineTests {
         while time < 1.0 {
             let current = machine.update(Self.inputs(face: target), now: time)
             let delta = simd_length(current - previous)
-            #expect(delta < 0.01, "在 t=\(time) 处跳变 \(delta) 米")
+            #expect(delta < 0.02, "在 t=\(time) 处跳变 \(delta) 米")
             previous = current
             time += 1.0 / 120.0
         }
@@ -1731,7 +1755,7 @@ struct ViewerPoseStateMachineTests {
 
         while time < 1.5 {
             let current = machine.update(Self.inputs(motion: motionPose), now: time)
-            #expect(simd_length(current - previous) < 0.01,
+            #expect(simd_length(current - previous) < 0.02,
                     "降级过程在 t=\(time) 跳变")
             previous = current
             time += 1.0 / 120.0
@@ -1764,7 +1788,7 @@ struct ViewerPoseStateMachineTests {
         }
         while time < 0.8 {
             let current = machine.update(Self.inputs(motion: SIMD3(-0.08, 0.05, 0.45)), now: time)
-            #expect(simd_length(current - previous) < 0.01,
+            #expect(simd_length(current - previous) < 0.02,
                     "中途改变目标时在 t=\(time) 跳变")
             previous = current
             time += 1.0 / 120.0
@@ -1785,7 +1809,7 @@ struct ViewerPoseStateMachineTests {
                 Self.inputs(face: faceAvailable ? facePose : nil, motion: motionPose),
                 now: time
             )
-            #expect(simd_length(current - previous) < 0.01, "第 \(step) 步振荡")
+            #expect(simd_length(current - previous) < 0.02, "第 \(step) 步振荡")
             #expect(current.x.isFinite && current.y.isFinite && current.z.isFinite)
             previous = current
             time += 1.0 / 120.0
