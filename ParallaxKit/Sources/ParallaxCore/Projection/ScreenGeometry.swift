@@ -1,7 +1,7 @@
 import Foundation
 import simd
 
-/// 界面相对设备原生方向的旋转量。
+/// 设备相对其原生方向的旋转量。
 ///
 /// 刻意不用 `UIInterfaceOrientation`：一来 Core 不许依赖平台框架（尤其是 UIKit），
 /// 二来那个枚举的 left/right 语义长期是混淆源。这里用旋转角度描述，数学上无歧义。

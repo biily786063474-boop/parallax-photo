@@ -75,7 +75,7 @@ worldEye = faceAnchor.transform * faceAnchor.leftEyeTransform
 
 框架级米制约定的直接证据（其他头文件）：`ARHitTestResult.h:53`「distance from the camera to the intersection **in meters**」、`ARDepthData.h:30`「per-pixel depth data (**in meters**)」、`ARWorldMap.h:27/:32`、`ARReferenceImage.h:31`、`ARBodyAnchor.h:27`（骨架默认身高 1.71 meters）。
 
-由于 `ARFaceAnchor.transform` 与上述类型共享同一世界坐标空间（`ARAnchor.h:73`），米制**推定成立**。但严格说眼位单位在头文件中无直接书面依据 → 见 §6 真机探针 P9（量瞳距验证，成人约 0.058–0.068 m）。
+由于 `ARFaceAnchor.transform` 与上述类型共享同一世界坐标空间（`ARAnchor.h:73`），米制**推定成立**。但严格说眼位单位在头文件中无直接书面依据 → 见 §6 真机探针 P9（量瞳距验证，成人约 0.050–0.075 m）。
 
 ### 1.5 视频格式与帧率
 

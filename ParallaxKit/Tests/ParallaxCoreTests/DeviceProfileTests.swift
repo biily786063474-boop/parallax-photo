@@ -55,6 +55,10 @@ struct DeviceProfileTests {
                 "iPhone 是屏内挖孔，不应落在显示区之外")
 
         let iPad = DeviceProfileRegistry.iPadPro11M4
+        // ⚠️ 下面这组 iPad 断言编码的是未经校准的 P11 猜测（DeviceProfile.isCalibrated
+        // == false），不是实测事实。真机探针跑完、Task 12 回填校准值后，这里预期会被
+        // 重新核对甚至改写——到时若断言与新数据冲突，那是「校准结果 vs 旧猜测」，
+        // 不要把它当成回归。
         // M4 iPad Pro 把摄像头移到了长边，竖持时位于左侧边框上——在显示区之外
         #expect(iPad.screen.cameraOffset.x < 0, "iPad 摄像头应在屏幕中心左侧")
         #expect(abs(iPad.screen.cameraOffset.x) > iPad.screen.width / 2,

@@ -70,6 +70,18 @@ struct DepthNormalizationTests {
         #expect(abs(map.values[3] - 0) < 1e-5, "NaN 应填成 0（最远），实为 \(map.values[3])")
     }
 
+    @Test("depth 分支的缺失像素同样填成最远")
+    func missingPixelsBecomeFarthestForDepthToo() throws {
+        // 方向翻转发生在 NaN 守卫之后。若有人把填充挪进翻转里，
+        // 空洞会变成「最近」——画面里会凸出一块并不存在的前景，
+        // 而 disparity 那条测试完全发现不了。
+        let raw: [Float] = [0.5, 1.0, 1.5, .nan]
+        let map = try #require(DepthNormalization.normalize(
+            raw: raw, width: 2, height: 2, kind: .depth, percentileClip: 0
+        ))
+        #expect(abs(map.values[3] - 0) < 1e-5, "NaN 应填成 0（最远），实为 \(map.values[3])")
+    }
+
     @Test("全为常量时退化为平面而非崩溃")
     func constantInputDegradesGracefully() throws {
         let map = try #require(DepthNormalization.normalize(

@@ -18,7 +18,7 @@ struct ProbeMeasurement: Identifiable {
     }
 }
 
-/// 全部 11 项探针的测量结果。编号与 docs/api-facts-arkit-depth.md §6 一一对应。
+/// 全部 12 项探针的测量结果。编号与 docs/api-facts-arkit-depth.md §6 一一对应。
 @Observable
 final class ProbeReport {
     var measurements: [ProbeMeasurement] = [
@@ -32,7 +32,8 @@ final class ProbeReport {
         ProbeMeasurement(id: "P8", title: "configurableCaptureDevice 是否为 nil"),
         ProbeMeasurement(id: "P9", title: "眼位单位（实测瞳距）"),
         ProbeMeasurement(id: "P10", title: "capturedDepthData 类型与分辨率"),
-        ProbeMeasurement(id: "P11", title: "设备标识符与屏幕参数")
+        ProbeMeasurement(id: "P11", title: "设备标识符与屏幕参数"),
+        ProbeMeasurement(id: "P12", title: "双眼中点在相机空间的完整向量")
     ]
 
     func set(_ id: String, value: String, note: String = "") {

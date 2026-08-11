@@ -184,7 +184,11 @@ ARFaceAnchor（频率见探针 P1/P3）
   ▼
 相机空间眼位
   │
-  │ [3] screenEye = cameraSpaceEye + deviceProfile.cameraToScreenCenter
+  │ [3] screenEye = flipZ(cameraSpaceEye) − deviceProfile.screen.cameraOffset
+  │     ⚠️ 是减不是加：cameraOffset 是「摄像头相对屏幕中心」，
+  │        要的是「眼睛相对屏幕中心」，所以减。
+  │     ⚠️ Z 要翻转：ARKit 相机空间看向 −Z，屏幕空间 Z 指向用户。
+  │        翻转方向由探针 P12 实测确认后写死。
   ▼
 屏幕坐标系眼位（原点=屏幕中心，米）
   │

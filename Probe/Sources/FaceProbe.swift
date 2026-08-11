@@ -29,7 +29,7 @@ final class FaceProbe: NSObject, ARSessionDelegate {
         measureStaticFacts()
 
         guard ARFaceTrackingConfiguration.isSupported else {
-            report.set("P1", value: "不支持", note: "本机型不支持人脸追踪")
+            appendFailureNote(to: "P1", "isSupported=false：本机型不支持人脸追踪")
             return
         }
         let configuration = ARFaceTrackingConfiguration()
@@ -38,6 +38,14 @@ final class FaceProbe: NSObject, ARSessionDelegate {
 
     func stop() {
         session.pause()
+    }
+
+    /// 把失败信息追加到某项已测量结果的 note 里，绝不覆盖已经拿到的 value。
+    /// P1（视频格式列表）是一次性静态测量，之后任何瞬时失败事件都不该把它冲掉。
+    private func appendFailureNote(to id: String, _ text: String) {
+        guard let existing = report.measurements.first(where: { $0.id == id }) else { return }
+        let note = existing.note.isEmpty ? text : "\(existing.note) | \(text)"
+        report.set(id, value: existing.value, note: note)
     }
 
     /// 不需要跑起 session 就能测的部分
@@ -111,7 +119,7 @@ final class FaceProbe: NSObject, ARSessionDelegate {
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
-        report.set("P1", value: "session 失败", note: error.localizedDescription)
+        appendFailureNote(to: "P1", "session 失败: \(error.localizedDescription)")
     }
 
     // MARK: - 各项测量
@@ -147,8 +155,16 @@ final class FaceProbe: NSObject, ARSessionDelegate {
         let position = frame.camera.transform.columns.3
         report.set(
             "P2",
-            value: String(format: "cam pos (%.3f, %.3f, %.3f) m", position.x, position.y, position.z),
-            note: "启动时若接近原点，说明世界原点确实落在设备初始位姿"
+            value: String(format: "cam pos (%+.3f, %+.3f, %+.3f) m", position.x, position.y, position.z),
+            note: """
+            这里只报数，不下结论。ARKit 头文件从未定义 session 启动时世界原点落在哪里\
+            （见 api-facts §1.3），「原点在设备初始位姿」是在线文档的说法、已列入 §5 的\
+            待纠正记忆。
+            观察方法：启动后保持设备静止读一次，然后平移设备约 20cm 再读一次，\
+            看这三个数是否随设备移动而变化、变化量是否与实际位移相当。
+            本项目的换算不依赖这个答案（走 viewMatrix(for:) 直接得相机空间），\
+            这条只是为了把未知量记录成已知量。
+            """
         )
     }
 
@@ -219,6 +235,29 @@ final class FaceProbe: NSObject, ARSessionDelegate {
             交叉验证：闭上你的左眼，看 L / R 哪个数值涨上去。
             """
         )
+
+        // P12：双眼中点在相机空间的完整向量。渲染管线要的就是这个量，
+        // 尤其是 Z 的符号——它决定屏幕空间换算里要不要取负。
+        // P5 只取了 X，P9 只取了无符号距离，都答不了这个问题。
+        let midpointWorld = (leftPosition + rightPosition) / 2
+        if let viewMatrix {
+            let midpointCamera = viewMatrix * SIMD4(midpointWorld, 1)
+            report.set(
+                "P12",
+                value: String(
+                    format: "(%+.4f, %+.4f, %+.4f) m",
+                    midpointCamera.x, midpointCamera.y, midpointCamera.z
+                ),
+                note: """
+                正对屏幕约 35cm 时读这三个数：模长应接近 0.35。
+                Z 为负 → 相机看向 −Z（用户在相机前方的负 Z 侧），\
+                换算到屏幕空间（Z 指向用户）时需取负。
+                Z 为正 → 无需取负。这条决定 spec 第 6 节步骤 [3] 的符号。
+                """
+            )
+        } else {
+            report.set("P12", value: "—", note: "本帧无 currentFrame，无法取 viewMatrix")
+        }
 
         // P9：瞳距。成人正常范围约 50–75 mm；若量出的是 0.050–0.075 说明单位是米。
         let distance = simd_length(leftPosition - rightPosition)
