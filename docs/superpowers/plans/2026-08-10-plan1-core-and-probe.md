@@ -782,18 +782,46 @@ struct OffAxisProjectionTests {
         #expect(abs(m.columns.2.y) < 1e-6)
     }
 
-    @Test("眼位左移时屏幕中心向右偏")
-    func eyeMovingLeftShiftsCenterRight() {
+    @Test("离轴投影产生真实视差：屏幕前后的点朝相反方向移动")
+    func offAxisProducesOppositeParallax() {
+        // 这条测试守护的是离轴投影存在的理由。
+        // 简单平移会让所有点同向移动等量；只有真正的离轴视锥
+        // 才会让屏幕平面前后的点朝相反方向偏移——那就是视差。
+        let centeredEye = SIMD3<Float>(0, 0, 0.3)
+        let leftEye = SIMD3<Float>(-0.05, 0, 0.3)
+        let behindScreen = SIMD3<Float>(0, 0, -0.1)   // 屏幕后方，远离观察者
+        let inFrontOfScreen = SIMD3<Float>(0, 0, 0.1) // 屏幕前方，靠近观察者
+
         let centered = OffAxisProjection.matrix(
-            eye: SIMD3(0, 0, 0.3), screen: Self.screen, near: Self.near, far: Self.far
+            eye: centeredEye, screen: Self.screen, near: Self.near, far: Self.far
         )
         let shifted = OffAxisProjection.matrix(
-            eye: SIMD3(-0.05, 0, 0.3), screen: Self.screen, near: Self.near, far: Self.far
+            eye: leftEye, screen: Self.screen, near: Self.near, far: Self.far
         )
-        let origin = SIMD3<Float>(0, 0, 0)
-        #expect(abs(Self.project(origin, centered).x) < 1e-5)
-        // 眼睛往左，屏幕中心相对视线就在右边
-        #expect(Self.project(origin, shifted).x > 0.01)
+
+        // 眼位居中时，屏幕轴线上的点都投在画面正中
+        #expect(abs(Self.project(behindScreen, centered).x) < 1e-5)
+        #expect(abs(Self.project(inFrontOfScreen, centered).x) < 1e-5)
+
+        // 眼位左移后：后方的点向左偏，前方的点向右偏
+        let behindShift = Self.project(behindScreen, shifted).x
+        let frontShift = Self.project(inFrontOfScreen, shifted).x
+        #expect(behindShift < -0.01, "屏幕后方的点未向左偏：\(behindShift)")
+        #expect(frontShift > 0.01, "屏幕前方的点未向右偏：\(frontShift)")
+        // 两者必须反向——这是视差的本质，不是幅度差异
+        #expect(behindShift * frontShift < 0, "前后景未朝相反方向移动，这不是真视差")
+    }
+
+    @Test("屏幕中心恒映射到 NDC 原点，与眼位无关", arguments: eyePositions)
+    func screenCenterIsInvariant(_ eye: SIMD3<Float>) {
+        // 四角映射到 NDC 的 ±1，中心作为四角中点必然映射到 0。
+        // 这不是巧合，是离轴投影的定义决定的——所以它跟眼位无关。
+        let m = OffAxisProjection.matrix(
+            eye: eye, screen: Self.screen, near: Self.near, far: Self.far
+        )
+        let ndc = Self.project(SIMD3<Float>(0, 0, 0), m)
+        #expect(abs(ndc.x) < 1e-5, "眼位 \(eye) 下屏幕中心 x 偏移了 \(ndc.x)")
+        #expect(abs(ndc.y) < 1e-5, "眼位 \(eye) 下屏幕中心 y 偏移了 \(ndc.y)")
     }
 
     @Test("近平面映射到 0，远平面映射到 1（Metal 深度约定）")
