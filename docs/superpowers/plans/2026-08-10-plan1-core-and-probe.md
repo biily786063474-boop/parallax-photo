@@ -16,6 +16,8 @@
 - **`DepthMap.values` 保证不含 NaN/Inf。** 这是类型不变量，由构造器强制。
 - 部署目标 **iOS 17.0** / macOS 14.0。
 - 严格 TDD：**先写会失败的测试，跑一次确认它失败，再写实现。** 实现写在测试前面的，删掉重来。
+- **补写的测试必须证明自己能失败。** 当测试是在实现已存在之后补的（审查发现覆盖缺口、修 bug 时补回归测试），没有天然的 RED 阶段。这时必须临时把被测行为破坏掉，跑一次看它变红，再恢复，并把那次失败的输出写进报告。
+  一条从未见过红色的测试，和一条什么都没测的测试，在证据上是同一回事。
 - 每个 Task 结束必须提交，提交信息用中文描述做了什么。
 - 探针 app **不得**写入任何文件、不得联网。眼位数据只打印到控制台。
 
@@ -300,6 +302,36 @@ struct OneEuroFilterTests {
         #expect(abs(out.x - 1) < 1e-3)
         #expect(abs(out.y - 2) < 1e-3)
         #expect(abs(out.z - 3) < 1e-3)
+    }
+
+    @Test("beta 自适应确实在起作用")
+    func adaptiveBetaSpeedsUpFastMotion() {
+        // 同一个阶跃信号分别喂给 beta=0（退化成固定截止频率的低通）和高 beta 的滤波器。
+        // 高 beta 在快速变化时会把截止频率抬上去，因此应当明显更快追上目标。
+        //
+        // 这条测试守护的是这个滤波器存在的理由本身：
+        // 把 cutoff 里的 beta 项删掉，它必须变红。
+        var fixed = OneEuroFilter(minCutoff: 1.0, beta: 0.0, derivativeCutoff: 1.0)
+        var adaptive = OneEuroFilter(minCutoff: 1.0, beta: 50.0, derivativeCutoff: 1.0)
+
+        // 两者先各自稳定在 0
+        for i in 0..<30 {
+            let timestamp = TimeInterval(i) / 60.0
+            _ = fixed.filter(0, timestamp: timestamp)
+            _ = adaptive.filter(0, timestamp: timestamp)
+        }
+
+        // 阶跃到 1.0，只看之后的 10 步——这是自适应与否差别最大的窗口
+        var fixedOutput: Float = 0
+        var adaptiveOutput: Float = 0
+        for i in 30..<40 {
+            let timestamp = TimeInterval(i) / 60.0
+            fixedOutput = fixed.filter(1.0, timestamp: timestamp)
+            adaptiveOutput = adaptive.filter(1.0, timestamp: timestamp)
+        }
+
+        #expect(adaptiveOutput > fixedOutput + 0.05,
+                "高 beta 未能更快追上目标：adaptive=\(adaptiveOutput) vs fixed=\(fixedOutput)")
     }
 }
 
