@@ -381,7 +381,7 @@ CFDictionaryRef CGImageSourceCopyAuxiliaryDataInfoAtIndex(
 | P6 | `lookAtPoint` 的实际尺度与距离含义 | 打印模长并与已知距离对照 | 决定是否使用（本期备选） |
 | P7 | `ARFaceGeometry.vertices` 坐标系 | 打印极值 | 本期不用，备查 |
 | P8 | `configurableCaptureDeviceForPrimaryCamera` 在人脸追踪下是否返回 nil | 打印 | 验证 §2.8 的独占结论 |
-| P9 | 眼位单位是否为米 | 量双眼世界坐标距离，对照成人瞳距 0.058–0.068 m | **单位错会让视差差 1000 倍** |
+| P9 | 眼位单位是否为米 | 量双眼世界坐标距离，对照成人瞳距 0.050–0.075 m | **单位错会让视差差 1000 倍** |
 | P10 | `ARFrame.capturedDepthData` 的 `depthDataType` 与分辨率 | 打印 `depthDataType` 四字符码 + `CVPixelBufferGetWidth/Height` | 决定现拍路径的深度处理分支 |
 | P11 | 设备物理参数：屏幕显示区物理尺寸、前置摄像头相对屏幕中心的偏移 | 实测（尺量 + 已知机型规格核对） | 决定离轴投影的正确性基线 |
 
