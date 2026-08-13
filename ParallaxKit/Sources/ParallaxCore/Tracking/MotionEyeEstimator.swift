@@ -43,6 +43,11 @@ public enum MotionEyeEstimator {
     ///   - distance: 假定的观察距离，米。非正数或非有限数安全返回零向量。
     ///   - sensitivity: 旋转量缩放系数，见类型文档。`<= 0` 时恒为零向量；
     ///     不做上限裁剪——调用方想要"超线性"的夸张效果时可以传大于 1 的值。
+    ///     默认值 1.0——不缩放，直接用几何真值，与 `faceTracking` 是同一把尺子
+    ///     （推导见下方实现里的注释）。真机反馈"陀螺仪速率和面部追踪没保持一致"
+    ///     后从曾经的 0.5 改回来；如果手感上还需要再缩放，调用方
+    ///     （`ParallaxApp.PoseController.motionSensitivity`）把它做成真机可调滑块，
+    ///     不该在这里为"手感"重新猜一个硬编常数。
     /// - Returns: 相对参考姿态的位移增量。`reference == current` 时**精确**为零向量
     ///   （不依赖浮点运算恰好抵消，直接短路返回，见下方实现），因为这是接管瞬间
     ///   不产生跳变的核心契约。
@@ -50,7 +55,7 @@ public enum MotionEyeEstimator {
         from reference: simd_quatf,
         to current: simd_quatf,
         distance: Float,
-        sensitivity: Float = 0.5
+        sensitivity: Float = 1.0
     ) -> SIMD3<Float> {
         guard distance.isFinite, distance > 0 else { return .zero }
         guard sensitivity.isFinite else { return .zero }
@@ -72,8 +77,12 @@ public enum MotionEyeEstimator {
         // 相对旋转：设备从 reference 转到 current 的姿态变化，世界系下的标准公式。
         let delta = normalizedCurrent * normalizedReference.inverse
 
-        // sensitivity 缩放旋转量：直接映射会让视差过大，实际使用中手机转动幅度
-        // 远大于头部移动。轴选 +Z 只是占位——angle 为 0 时轴不影响结果。
+        // sensitivity 缩放旋转量。默认 1.0，即不缩放：设备转动换算出的观察者
+        // 等效位移直接按几何真值给，与 faceTracking（ARKit 实测眼位，严格 1:1）
+        // 是同一把尺子。曾经默认给 0.5，理由是"手机转动幅度远大于头部移动，
+        // 1:1 会让视差夸张"——这是没有真机依据的主观猜测，真机反馈"陀螺仪速率
+        // 和面部追踪没保持一致"证明它站不住：两个源用不同尺度换算位移，源切换
+        // 时能感觉到速率断层。轴选 +Z 只是占位——angle 为 0 时轴不影响结果。
         let identity = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 0, 1))
         let scaledDelta = simd_slerp(identity, delta, sensitivity)
 

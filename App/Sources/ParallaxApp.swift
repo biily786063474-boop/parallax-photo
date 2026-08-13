@@ -104,14 +104,24 @@ struct ParallaxView: View {
     }
 }
 
-/// 真机验收用的参数滑块条：视差强度 + 零视差面。两个都是「肉眼参数」——
-/// 合适的值取决于具体照片和个人对空间感的取舍，不该在代码里硬编一个猜的
-/// 数字，而是让滑块和数值同时露出来，边看画面边拖，当场就能定下来。
+/// 真机验收用的参数滑块条：视差强度 + 零视差面 + 陀螺仪灵敏度。三个都是
+/// 「肉眼参数」——合适的值取决于具体照片、机型和个人对空间感的取舍，不该在
+/// 代码里硬编一个猜的数字，而是让滑块和数值同时露出来，边看画面边拖，当场
+/// 就能定下来（陀螺仪灵敏度上一次就是这么猜错的：默认 0.5 全靠拍脑袋，真机
+/// 反馈"陀螺仪速率和面部追踪没保持一致"才发现不对）。
 ///
 /// 用 `@Bindable` 而不是手搓 `Binding(get:set:)`：`PoseController` 已经是
 /// `@Observable`，`@Bindable` 直接从它的属性生成双向绑定，滑块拖动与数值
 /// 文字会一起刷新——手搓的 get/set 闭包也能让 Slider 本身动起来，但旁边
 /// 那行文字不保证跟着重绘（它不经过 Observation 的访问追踪）。
+///
+/// 三行都塞进这同一条浮层，不做折叠：这条控制条本来就是 `.overlay(alignment:
+/// .bottom)` 浮在全屏 Metal 画面之上（半透明黑底），不是挤占主画面布局空间的
+/// 独立分区——Metal 视图始终 `.ignoresSafeArea()` 铺满全屏，加一行滑块只是让
+/// 浮层本身变高了几十点，不会缩小画面的可视区域。折叠交互（默认收起、点开）
+/// 对这条纯调试用的验收 HUD 反而是负收益：真机验收时经常要一边用手盖住/移开
+/// 摄像头切换追踪源，一边立刻看陀螺仪灵敏度这一行数值有没有跟上——多一次展开
+/// 点击就多一次分心。
 private struct ParallaxControlsBar: View {
     @Bindable var poseController: PoseController
 
@@ -128,6 +138,12 @@ private struct ParallaxControlsBar: View {
                 valueText: String(format: "%.2f", poseController.zeroParallax),
                 value: $poseController.zeroParallax,
                 range: 0...1
+            )
+            row(
+                title: "陀螺仪灵敏度",
+                valueText: String(format: "%.2f", poseController.motionSensitivity),
+                value: $poseController.motionSensitivity,
+                range: 0...2.0
             )
         }
         .padding(.horizontal, 16)
@@ -260,8 +276,18 @@ final class PoseController: NSObject, ARSessionDelegate {
     private var motionReferenceAttitude: simd_quatf?
 
     /// 陀螺仪增量的缩放系数，见 `MotionEyeEstimator.offset(sensitivity:)`。
-    /// 用默认值 0.5——手机转动幅度远大于头部移动，直接 1:1 映射视差会过大。
-    private let motionSensitivity: Float = 0.5
+    ///
+    /// 默认值 1.0——不缩放，直接用几何真值，与 faceTracking（ARKit 实测眼位，
+    /// 严格 1:1）是同一把尺子。曾经默认给 0.5，理由是"手机转动幅度远大于头部
+    /// 移动，1:1 会让视差夸张"——这是没有真机依据的主观猜测。真机反馈"陀螺仪
+    /// 速率和面部追踪没保持一致"证明它站不住：两个源换算位移用的尺度不一样，
+    /// `faceTracking → motion` 切换那一刻能感觉到速率断层。
+    ///
+    /// 真机验收滑块条（`ParallaxControlsBar`）实时调节，范围 `0...2.0`——
+    /// 上次凭空猜的 0.5 已经猜错一次，这次不猜了，让用户在盖住/移开摄像头的
+    /// 切换瞬间当场比对两个源手感是否一致，找到真正合适的值。跟 `parallaxScale`
+    /// / `zeroParallax` 一样是需要现场调的参数，不该硬编一个数字。
+    var motionSensitivity: Float = 1.0
 
     /// ARKit 最近一次给出的、已滤波夹紧过的眼位。是否仍然「新鲜」由
     /// `lastTrackedAt` + `trackingTimeout` 判定，不在这里判断——
