@@ -7,10 +7,15 @@ import ParallaxCore
 
 /// Metal 渲染器：把 `ParallaxCore` 算好的离轴投影矩阵应用到深度位移网格上。
 ///
-/// **Plan 4 Task 4 起是两层 LDI**：有分割遮罩时，画面拆成背景层（外扩填补过
-/// 的图，先画，不 discard）与前景层（原图，后画，遮罩外的片元 `discard_
-/// fragment()`）——根治人物轮廓锯齿的关键设计，见 `SceneTextures` 与
-/// `draw(in:)` 的注释。没有遮罩（非人像照片、Vision 分割失败）时退回单层：
+/// **Plan 4 Task 4 起是两层 LDI**：有分割遮罩时，画面拆成背景层（颜色与深度
+/// 都外扩填补过，先画，不 discard）与前景层（原图，后画，遮罩外的片元
+/// `discard_fragment()`）——根治人物轮廓锯齿的关键设计，见 `SceneTextures` 与
+/// `draw(in:)` 的注释。**颜色与深度必须都填补，缺一个都不够**：背景层自身
+/// 不 discard，只要它的深度在遮罩边界还留着断崖（哪怕颜色已经填得很好），
+/// 跨越那个台阶的三角形照样会被拉成陡坡，锯齿只是从前景层转移到背景层——
+/// 真机反馈"物品和背景衔接的地方还是有大量锯齿"就是这里，见
+/// `makeLayeredTextures` 里 `BackgroundInpainting.fillScalar` 那一段。
+/// 没有遮罩（非人像照片、Vision 分割失败）时退回单层：
 /// 一张高密度网格，顶点只在 Z 方向按深度图位移，这条路径是 Plan 3 就验证过的
 /// 「ARKit 眼位 → 离轴投影 → Metal 上屏」链路，原样保留作兜底。
 ///
@@ -197,7 +202,11 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
         // 可能与相邻远处顶点的投影发生重叠，深度测试保证近的正确遮住远的，
         // 而不是靠三角形提交顺序侥幸对。两层模式下这条同样成立且更重要：
         // 背景层先画、前景层后画，前景在遮罩内的片元必须真的比背景层（尤其是
-        // 前景处已经被压到远平面的背景深度）更近才能通过测试正确盖住背景——
+        // 前景处已经用 BackgroundInpainting.fillScalar 填补过的背景深度，
+        // 约等于周围背景本身的深度）更近才能通过测试正确盖住背景——真实照片
+        // 里前景主体天然比它身后的背景更靠近相机，这个大小关系几乎总成立；
+        // 万一某个像素恰好相等，最坏结果也只是那一个像素的胜负不确定，
+        // 不会像上一轮"压到远平面"那样在整条边界制造几何台阶。
         // 见 updateScene 里"背景层深度"一节与 draw(in:) 的绘制顺序。
         let depthDescriptor = MTLDepthStencilDescriptor()
         depthDescriptor.depthCompareFunction = .less
@@ -213,9 +222,10 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     // MARK: - 换素材（Task 3 起，Task 4 加两层）
 
     /// 与 `BackgroundInpainting.fill` 的默认 `threshold` 参数保持一致——
-    /// 背景层"把前景处的深度压到远平面"这一步，跟背景层"把前景处的颜色
-    /// 外扩填补"那一步必须用同一个"洞"的判据，否则会出现颜色已经填成
-    /// 背景、深度却还留着人像凸起这种两层对不上的情况。
+    /// 背景层"用 fillScalar 外扩填补前景处的深度"这一步，跟背景层"用 fill
+    /// 外扩填补前景处的颜色"那一步必须用同一个"洞"的判据，否则会出现颜色
+    /// 已经填成背景、深度却还留着人像凸起（或反过来，深度已经平滑过渡、
+    /// 颜色还留着一圈没填干净的旧前景）这种两层对不上的情况。
     private static let maskHoleThreshold: Float = 0.5
 
     /// 换素材：彩色图 + 深度图 + 可选遮罩，建新纹理替换当前正在渲染的场景。
@@ -238,6 +248,11 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     func updateScene(color: CGImage, depth: DepthMap, mask: MaskMap?) -> Bool {
         if let mask, let layered = Self.makeLayeredTextures(device: device, color: color, depth: depth, mask: mask) {
             sceneTextures = layered
+            // 诊断①（真机反馈"物品和背景衔接的地方还是有大量锯齿"排查用）：
+            // 确认这次真的走了两层路径——如果压根没走到这里，下面②③④那些
+            // 遮罩/深度诊断全部无从谈起，这是要先确认的第一件事。
+            print("ParallaxRenderer[诊断①路径]: 两层渲染路径生效（拿到遮罩且两层素材构建成功）")
+            fflush(stdout)
             return true
         }
 
@@ -251,8 +266,8 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
             return false
         }
         print(mask == nil
-            ? "ParallaxRenderer: 无遮罩，使用单层渲染"
-            : "ParallaxRenderer: 两层素材构建失败，退回单层渲染")
+            ? "ParallaxRenderer[诊断①路径]: 无遮罩，使用单层渲染"
+            : "ParallaxRenderer[诊断①路径]: 两层素材构建失败，退回单层渲染")
         fflush(stdout)
         sceneTextures = fallback
         return true
@@ -271,8 +286,8 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     }
 
     /// 两层场景的一次性构建：外扩填补背景色、把遮罩重采样到两个目标分辨率
-    /// （色图分辨率给前景层的遮罩纹理、深度图分辨率给背景层"把前景处深度
-    /// 压远"这一步）、建齐五张纹理。任何一步失败都返回 `nil`，调用方
+    /// （色图分辨率给前景层的遮罩纹理、深度图分辨率给背景层"外扩填补前景处
+    /// 深度"这一步）、建齐五张纹理。任何一步失败都返回 `nil`，调用方
     /// （`updateScene`）退回单层——两层构建失败不该连累这张新照片显示不出来。
     private static func makeLayeredTextures(
         device: MTLDevice, color: CGImage, depth: DepthMap, mask: MaskMap
@@ -315,22 +330,48 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
             device: device, pixels: filledPixels, width: raw.width, height: raw.height
         ) else { return nil }
 
-        // 背景层深度：前景处的深度已无意义（简报原话），统一压到最远
-        // （0 == DepthNormalization 的"0=最远"约定），而不是对深度也做一次
-        // push-pull 外扩填补——`BackgroundInpainting` 只对 RGBA8 定义，深度
-        // 是单通道浮点，硬套是一条没有测试覆盖的新路径；简报本身也明确给了
-        // 这条更简单的替代方案（"或统一压到远平面"）。这里另外重采样一次
-        // 遮罩到深度分辨率，而不是复用 maskAtColorRes 做最近邻下采样——
-        // MaskResampling 的双线性重采样对每个深度分辨率下的判据更准确，
-        // 且深度图分辨率通常远小于色图，这一步开销可以忽略。
+        // 背景层深度：前景处的原始深度对背景层没有意义（那是被前景层剔除、
+        // 露出背景层之后不该再看到的东西），**但不能像上一轮那样断崖式压到
+        // 远平面（0）**。背景层自身正常绘制、不 discard——压平的边界正是
+        // 背景层几何自己的陡峭台阶，跨越它的三角形同样会被拉成陡坡，产生
+        // 的锯齿跟两层 LDI 之前完全同源，只是从前景层转移到了背景层：真机
+        // 反馈"物品和背景衔接的地方还是有大量锯齿"，根因正在这里（诊断④的
+        // 实测对比印证这一点，见下面 logBackgroundDepthFillEffect）。
+        //
+        // 正确做法与背景颜色的处理完全对称：外扩填补，让前景区域的深度
+        // 平滑延续周围背景的深度，而不是硬编码成一个跟周围背景毫无关系的
+        // 常数。`BackgroundInpainting.fillScalar` 是 `fill`（RGBA8 专用）的
+        // 单通道浮点版本，同一套 push-pull 金字塔思路，ParallaxKit 侧有
+        // 独立单元测试覆盖（含"填补后最大跳变显著小于压平"这条直接针对
+        // 本次问题的测试）。这里另外重采样一次遮罩到深度分辨率，而不是
+        // 复用 maskAtColorRes 做最近邻下采样——MaskResampling 的双线性重
+        // 采样对每个深度分辨率下的判据更准确，且深度图分辨率通常远小于
+        // 色图，这一步开销可以忽略。
         guard let maskAtDepthRes = MaskResampling.resample(
             mask: mask.values,
             from: (width: mask.width, height: mask.height), to: (width: depth.width, height: depth.height)
         ) else { return nil }
-        var backgroundDepthValues = depth.values
-        for i in 0..<backgroundDepthValues.count where maskAtDepthRes[i] >= Self.maskHoleThreshold {
-            backgroundDepthValues[i] = 0
-        }
+
+        // 诊断②③：遮罩本身是软过渡还是硬二值、颜色/深度/遮罩三者的实际
+        // 分辨率——这两条在"填不填补"之外独立成立，放在拿到 maskAtDepthRes
+        // 之后、真正调用 fillScalar 之前打印，与下面④（填补前后的效果对比）
+        // 合起来构成简报要求的完整诊断。
+        Self.logMaskAndResolutionDiagnostics(mask: mask, colorWidth: raw.width, colorHeight: raw.height, depth: depth)
+
+        guard let backgroundDepthValues = BackgroundInpainting.fillScalar(
+            values: depth.values, width: depth.width, height: depth.height,
+            holeMask: maskAtDepthRes, threshold: Self.maskHoleThreshold
+        ) else { return nil }
+
+        // 诊断④：背景深度"压到远平面"（上一轮真正在跑的行为，这里只是拿
+        // 同一份数据重新算一遍用来对比，不影响实际渲染）vs `fillScalar` 填补
+        // 后，边界的最大相邻跳变差多少——直接回答"背景层深度台阶"这个假设
+        // 是否成立、这次改动是否真的把台阶抹平了。
+        Self.logBackgroundDepthFillEffect(
+            rawDepthValues: depth.values, filledDepthValues: backgroundDepthValues,
+            maskAtDepthRes: maskAtDepthRes, width: depth.width, height: depth.height
+        )
+
         guard let backgroundDepthMap = DepthMap(width: depth.width, height: depth.height, values: backgroundDepthValues),
               let backgroundDepthTexture = Self.makeDepthTexture(device: device, depth: backgroundDepthMap)
         else { return nil }
@@ -339,6 +380,99 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
             foregroundColor: foregroundColorTexture, foregroundDepth: foregroundDepthTexture, mask: maskTexture,
             backgroundColor: backgroundColorTexture, backgroundDepth: backgroundDepthTexture
         )
+    }
+
+    // MARK: - 诊断日志（真机反馈"物品和背景衔接的地方还是有大量锯齿"排查用）
+
+    /// 诊断②③：只在真正走到两层构建、且已经把遮罩重采样到深度分辨率之后
+    /// 调一次（不是每帧）——`makeLayeredTextures` 只在 `updateScene` 换素材
+    /// 时调用，一张照片一次，打印成本可以忽略。`print` + `fflush(stdout)`：
+    /// 真机用 `devicectl device process launch --console` 或 Xcode Console 读。
+    ///
+    /// - 诊断②回答"遮罩是软过渡还是硬二值"：`parallaxFragmentMasked` 的
+    ///   `[kMaskLow, kMaskHigh] = [0.42, 0.58]` 羽化带假设遮罩本身是连续
+    ///   渐变的——如果 Vision 给出的实际是接近 0/1 的硬二值，落在这条窄带
+    ///   里的像素少之又少，羽化带形同虚设，边缘还是会显得生硬。软过渡占比
+    ///   统计的是落在 (0.05, 0.95) 这个更宽区间的像素比例，比直接量
+    ///   [0.42,0.58] 更能看出遮罩整体的"软硬程度"，不受这两个具体阈值
+    ///   本身取值的影响。
+    /// - 诊断③回答"三者分辨率关系"：`mask` 是 Vision 原始输出（文档保证
+    ///   精确等于彩色图分辨率），`colorWidth/colorHeight` 是本次实际解出的
+    ///   彩色图分辨率，`depth` 是 AVDepthData 的分辨率（真机实测常见远小于
+    ///   彩色图，比如 P10 记录的 640×480）。三者关系决定 MaskResampling
+    ///   在两处（前景遮罩纹理、背景深度阈值）分别是不是真的在做插值，还是
+    ///   尺寸相等时的直通。
+    private static func logMaskAndResolutionDiagnostics(
+        mask: MaskMap, colorWidth: Int, colorHeight: Int, depth: DepthMap
+    ) {
+        let stats = maskStats(mask.values)
+        print(String(
+            format: "ParallaxRenderer[诊断②遮罩统计]: min=%.4f max=%.4f "
+                + "软过渡占比(0.05,0.95)=%.2f%%（Vision 原始输出，共 %d 像素；"
+                + "占比越接近 0%% 越说明遮罩接近硬二值，[0.42,0.58] 羽化带没有实际过渡可用）",
+            stats.min, stats.max, stats.softFraction * 100, mask.values.count
+        ))
+        print("ParallaxRenderer[诊断③分辨率]: 遮罩=\(mask.width)x\(mask.height) "
+            + "彩色图=\(colorWidth)x\(colorHeight) 深度图=\(depth.width)x\(depth.height)")
+        fflush(stdout)
+    }
+
+    /// 遮罩统计：最小值、最大值、落在 (0.05, 0.95) 区间的像素占比。
+    private static func maskStats(_ values: [Float]) -> (min: Float, max: Float, softFraction: Float) {
+        guard !values.isEmpty else { return (0, 0, 0) }
+        var minV = Float.greatestFiniteMagnitude
+        var maxV = -Float.greatestFiniteMagnitude
+        var softCount = 0
+        for v in values {
+            minV = min(minV, v)
+            maxV = max(maxV, v)
+            if v > 0.05 && v < 0.95 { softCount += 1 }
+        }
+        return (minV, maxV, Float(softCount) / Float(values.count))
+    }
+
+    /// 诊断④：背景深度"压平前 vs fillScalar 填补后"的边界跳变对比。
+    ///
+    /// `compressedToFarPlane` 独立重算一遍上一轮真正在跑的行为（洞压到
+    /// 0），不是从 `filledDepthValues` 反推——这样才是真正的"前后对比"，
+    /// 而不是拿同一份已经修好的数据跟自己比。`holeFraction` 顺带回答
+    /// "被认定为洞（前景）的像素占深度图的比例"，用来判断这次改动影响的
+    /// 范围有多大。
+    private static func logBackgroundDepthFillEffect(
+        rawDepthValues: [Float], filledDepthValues: [Float], maskAtDepthRes: [Float], width: Int, height: Int
+    ) {
+        let holeFraction = Float(maskAtDepthRes.filter { $0 >= Self.maskHoleThreshold }.count)
+            / Float(maskAtDepthRes.count)
+
+        var compressedToFarPlane = rawDepthValues
+        for i in 0..<compressedToFarPlane.count where maskAtDepthRes[i] >= Self.maskHoleThreshold {
+            compressedToFarPlane[i] = 0
+        }
+        let jumpIfCompressedToFarPlane = maxAdjacentJump(compressedToFarPlane, width: width, height: height)
+        let jumpAfterFill = maxAdjacentJump(filledDepthValues, width: width, height: height)
+
+        print(String(
+            format: "ParallaxRenderer[诊断④背景深度台阶]: 洞（前景）占深度图比例=%.2f%% "
+                + "若压到远平面（上一轮行为）的边界最大跳变=%.4f "
+                + "fillScalar 填补后的边界最大跳变=%.4f",
+            holeFraction * 100, jumpIfCompressedToFarPlane, jumpAfterFill
+        ))
+        fflush(stdout)
+    }
+
+    /// 相邻像素（右邻 + 下邻）的最大绝对值跳变，衡量"这张深度图有多陡"。
+    /// 只用于诊断日志，不参与渲染，也不追求跟 GPU 侧任何计算一致——纯 CPU
+    /// 侧的粗粒度诊断指标。
+    private static func maxAdjacentJump(_ values: [Float], width: Int, height: Int) -> Float {
+        var maxJump: Float = 0
+        for y in 0..<height {
+            for x in 0..<width {
+                let i = y * width + x
+                if x + 1 < width { maxJump = max(maxJump, abs(values[i] - values[i + 1])) }
+                if y + 1 < height { maxJump = max(maxJump, abs(values[i] - values[i + width])) }
+            }
+        }
+        return maxJump
     }
 
     // MARK: - 网格与纹理构建
