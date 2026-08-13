@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import MetalKit
 import ARKit
+import CoreMotion
 import simd
 import Observation
 import QuartzCore
@@ -52,17 +53,33 @@ struct ParallaxView: View {
     }
 }
 
-/// 观察者位置控制器：ARKit 眼位追踪 → 屏幕空间眼位，追踪不可用时用 idle 兜底。
+/// CoreMotion 的四元数分量是 `Double`，`ParallaxCore`（含 `MotionEyeEstimator`）
+/// 全程用 `Float`——这是这条边界唯一的类型转换点。
+private extension CMQuaternion {
+    var simdQuatf: simd_quatf {
+        simd_quatf(vector: SIMD4<Float>(Float(x), Float(y), Float(z), Float(w)))
+    }
+}
+
+/// 观察者位置控制器：ARKit 眼位追踪 → 屏幕空间眼位，追踪不可用时依次降级到
+/// 陀螺仪、再到 idle 兜底。
 ///
 /// 接入了 `ParallaxCore` 的 `ViewerPoseStateMachine`（四级降级链 + 300ms
-/// 交叉淡入）。本阶段只喂 `faceTracking` 与 `idle` 两路，`motion`／`manual`
-/// 传 `nil`——陀螺仪与手势不在这次修复范围内，留给后续任务。
+/// 交叉淡入）。本阶段喂 `faceTracking`／`motion`／`idle` 三路，`manual`
+/// （手指拖动）仍传 `nil`——不在这次任务范围内，留给后续任务。
 ///
-/// idle 不再绕屏幕中心摆动，而是绕 `idleAnchor`：最后一次拿到有效人脸眼位
-/// 时的位置。追踪一丢，`tick()` 里的 idle 分支从这个锚点接着摆，状态机再把
-/// 它和丢失前的输出做 300ms 交叉淡入——两件事缺一都会跳：只做交叉淡入不挪
-/// 锚点，淡入的终点仍然在屏幕中心附近，跟用户实际所在位置脱节；只挪锚点不
-/// 做交叉淡入，退回硬切换，那一下瞬跳还在。
+/// idle 与 motion 共用同一个锚点 `idleAnchor`：最后一次拿到有效人脸眼位时的
+/// 位置。追踪一丢，`tick()` 里 idle 绕它摆、motion 在它上面叠加陀螺仪增量，
+/// 而不是分别退回屏幕中心或忽略已知位置。状态机再把当前激活的降级源和丢失前
+/// 的输出做 300ms 交叉淡入——两件事缺一都会跳：只做交叉淡入不挪锚点，淡入的
+/// 终点仍然在屏幕中心附近，跟用户实际所在位置脱节；只挪锚点不做交叉淡入，
+/// 退回硬切换，那一下瞬跳还在。
+///
+/// motion 具体怎么算见 `MotionEyeEstimator`：陀螺仪只给相对姿态，不知道观察者
+/// 在哪，所以追踪刚丢失的那一刻把当时的设备姿态记成参考姿态
+/// （`motionReferenceAttitude`），之后每帧算"参考姿态 → 当前姿态"的增量、
+/// 叠加到 `idleAnchor` 上——增量在接管瞬间精确为零（`MotionEyeEstimator` 的
+/// 核心契约），画面不会跳。
 @Observable
 final class PoseController: NSObject, ARSessionDelegate {
 
@@ -85,13 +102,33 @@ final class PoseController: NSObject, ARSessionDelegate {
     /// 降级链状态机：源切换时做 300ms 交叉淡入，见类型上方注释。
     private var poseStateMachine = ViewerPoseStateMachine()
 
-    /// idle 摆动锚点。每次 ARKit 给出有效眼位就更新（见
-    /// `session(_:didUpdate:)`），追踪丢失后 `tick()` 绕它继续摆，
-    /// 而不是绕屏幕中心——这是本次要修的 bug 本体。
+    /// 降级锚点：最后一次拿到有效人脸眼位时的位置，idle 与 motion 共用。每次
+    /// ARKit 给出有效眼位就更新（见 `session(_:didUpdate:)`），追踪丢失后
+    /// `tick()` 里 idle 绕它摆、motion 在它上面叠加陀螺仪增量，而不是分别
+    /// 退回屏幕中心或忽略已知位置——这是 idle 断层 bug 修复时定下的原则，
+    /// motion 延续同一条。
     ///
     /// 初值取 `idleGenerator` 的默认锚点（屏幕正前方 distance 处），
     /// 因为 app 启动瞬间、第一次拿到人脸之前，没有「最后已知眼位」可用。
     private var idleAnchor: SIMD3<Float>
+
+    /// 陀螺仪读数来源。用拉取式（轮询 `deviceMotion` 属性）而不是回调式
+    /// （`startDeviceMotionUpdates(to:withHandler:)`），好让姿态更新并入
+    /// `tick()` 这一条心跳，不再多开一条状态写入路径——idle 断层 bug 的
+    /// 教训就是"两条写入路径各写各的"。
+    private let motionManager = CMMotionManager()
+
+    /// 追踪丢失那一刻的设备姿态。`nil` 表示"当前在追踪中，或还没来得及采到
+    /// 参考姿态"；`tick()` 每帧判断：一旦重新追踪到人脸就清空，下次丢失再
+    /// 重新采一次——不能沿用旧参考，设备这段时间可能已经转动，旧参考会让
+    /// 重新丢失瞬间的增量不再是零。非 nil 时，`MotionEyeEstimator.offset(
+    /// from: 它, to: 当前姿态, ...)` 在采集的那一帧必然是零向量（reference
+    /// 和 current 是同一次读数），这是接管瞬间不跳变的保证。
+    private var motionReferenceAttitude: simd_quatf?
+
+    /// 陀螺仪增量的缩放系数，见 `MotionEyeEstimator.offset(sensitivity:)`。
+    /// 用默认值 0.5——手机转动幅度远大于头部移动，直接 1:1 映射视差会过大。
+    private let motionSensitivity: Float = 0.5
 
     /// ARKit 最近一次给出的、已滤波夹紧过的眼位。是否仍然「新鲜」由
     /// `lastTrackedAt` + `trackingTimeout` 判定，不在这里判断——
@@ -130,6 +167,16 @@ final class PoseController: NSObject, ARSessionDelegate {
         link.add(to: .main, forMode: .common)
         displayLink = link
 
+        // 陀螺仪独立于 ARKit 启动，不等人脸追踪成不成功——机型不支持人脸追踪、
+        // 或追踪随时丢失，都要靠它兜底（spec §9.3「机型不支持 → motion（启动
+        // 即定）」）。不可用时什么都不做：`motionManager.deviceMotion` 永远
+        // 是 nil，`tick()` 里读出的姿态自然也是 nil，`motion` 输入传不出去，
+        // 链路自动掉到 idle——不需要在别处再加一层"设备不支持"的特判。
+        if motionManager.isDeviceMotionAvailable {
+            motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+            motionManager.startDeviceMotionUpdates()
+        }
+
         guard ARFaceTrackingConfiguration.isSupported else {
             statusText = "本机型不支持人脸追踪，使用 idle 演示"
             return
@@ -142,6 +189,7 @@ final class PoseController: NSObject, ARSessionDelegate {
         displayLink?.invalidate()
         displayLink = nil
         session.pause()
+        motionManager.stopDeviceMotionUpdates()
     }
 
     /// 屏幕刷新节奏的心跳：状态机每帧都跑，不只在追踪丢失时跑。
@@ -159,10 +207,38 @@ final class PoseController: NSObject, ARSessionDelegate {
         let elapsed = Date().timeIntervalSince(startTime)
         let isTracking = lastTrackedAt.map { Date().timeIntervalSince($0) < trackingTimeout } ?? false
 
+        // 重新追踪到人脸：清掉参考姿态，下次丢失时从当时的姿态重新采一次
+        // （原因见 `motionReferenceAttitude` 的类型注释）。
+        if isTracking {
+            motionReferenceAttitude = nil
+        }
+
+        let currentAttitude = motionManager.deviceMotion.map { $0.attitude.quaternion.simdQuatf }
+
+        // 追踪丢失、且还没为这一次丢失采过参考姿态：现在采——"现在"就是接管
+        // 的起点，`MotionEyeEstimator` 保证这一帧算出的增量精确为零。
+        if !isTracking, motionReferenceAttitude == nil {
+            motionReferenceAttitude = currentAttitude
+        }
+
+        let motionEye: SIMD3<Float>?
+        if let reference = motionReferenceAttitude, let current = currentAttitude {
+            motionEye = idleAnchor + MotionEyeEstimator.offset(
+                from: reference,
+                to: current,
+                distance: idleAnchor.z,
+                sensitivity: motionSensitivity
+            )
+        } else {
+            // 还没有参考姿态（刚丢失、CoreMotion 还没来得及给出第一次读数），
+            // 或本机不支持陀螺仪：motion 传 nil，链路自动掉到 idle。
+            motionEye = nil
+        }
+
         let idleEye = idleGenerator.pose(at: elapsed, around: idleAnchor)
         let inputs = ViewerPoseInputs(
             faceTracking: isTracking ? latestFaceEye : nil,
-            motion: nil,
+            motion: motionEye,
             manual: nil,
             idle: idleEye
         )
