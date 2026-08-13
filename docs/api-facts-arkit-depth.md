@@ -136,7 +136,7 @@ worldEye = faceAnchor.transform * faceAnchor.leftEyeTransform
 
 | 成员 | 准确 ObjC 签名 | 行号 |
 |---|---|---|
-| 从字典构造 | `+ (nullable instancetype)depthDataFromDictionaryRepresentation:(NSDictionary *)imageSourceAuxDataInfoDictionary error:(NSError **)outError;` — **类工厂，不是 init** | :99 |
+| 从字典构造 | `+ (nullable instancetype)depthDataFromDictionaryRepresentation:(NSDictionary *)imageSourceAuxDataInfoDictionary error:(NSError **)outError;` — ObjC 层面是类工厂，不是 `-init`。**但 Swift 侧 ClangImporter 仍把它转成了 `init(fromDictionaryRepresentation:)`（吃 error 转 throws）——`AVDepthData.depthDataFromDictionaryRepresentation(_:)` 这个静态方法写法编译器直接报 unavailable，见 §4 表** | :99 |
 | 类型转换 | `- (instancetype)depthDataByConvertingToDepthDataType:(OSType)depthDataType;` | :114 |
 | 方向校正 | `- (instancetype)depthDataByApplyingExifOrientation:(CGImagePropertyOrientation)exifOrientation;` | :129 |
 | 像素数据 | `@property(readonly) CVPixelBufferRef depthDataMap NS_RETURNS_INNER_POINTER;` | :191 |
@@ -218,7 +218,7 @@ CFDictionaryRef CGImageSourceCopyAuxiliaryDataInfoAtIndex(
 |---|---|---|
 | `PHAssetMediaSubtypePhotoDepthEffect = (1UL << 4)` → Swift `PHAssetMediaSubtype.photoDepthEffect` | `PhotosTypes.h:148` | iOS 10.2+ |
 | `PHAssetCollectionSubtypeSmartAlbumDepthEffect = 212`（系统「人像」智能相册） | `PhotosTypes.h:99` | — |
-| `PHPickerFilter.depthEffectPhotosFilter` | `PhotosUI/PHPicker.h:92` | iOS 16+ |
+| ObjC 属性名 `depthEffectPhotosFilter`，**Swift 实际拼写是 `PHPickerFilter.depthEffectPhotos`**（去掉了 `Filter` 后缀，见 §4 表） | `PhotosUI/PHPicker.h:92` | iOS 16+ |
 
 **⚠️ `photoDepthEffect` 只是「有景深效果」的 flag，不等价于「一定能解出可用深度图」** —— 最终仍需用 ImageIO 打开原始数据实测。
 
@@ -344,8 +344,10 @@ CFDictionaryRef CGImageSourceCopyAuxiliaryDataInfoAtIndex(
 | ObjC selector | Swift 实际拼写 | 确认于 |
 |---|---|---|
 | `viewMatrixForOrientation:` | **`viewMatrix(for:)`** | Task 11 探针实现，编译器报错后修正 |
+| `+depthDataFromDictionaryRepresentation:error:` | **`AVDepthData(fromDictionaryRepresentation:)`**（throws 的 init，不是本文件 §2.1 曾以为的静态方法） | Plan 3 Task 2，`AVDepthData.depthDataFromDictionaryRepresentation(_:)` 编译器报 `has been replaced by 'init(fromDictionaryRepresentation:)'` 后修正 |
+| `depthEffectPhotosFilter`（`PHPickerFilter` 的 ObjC 属性） | **`PHPickerFilter.depthEffectPhotos`**（去掉 `Filter` 后缀，不是本文件 §2.5 曾直译的 `.depthEffectPhotosFilter`） | Plan 3 Task 2，`swiftc -typecheck` 对照两种写法实测，`.depthEffectPhotosFilter` 报 `has no member` |
 
-这条恰好印证了本节的规矩：按 ObjC selector 直译成 `viewMatrixForOrientation(_:)` 编译不过。
+前一条恰好印证了本节的规矩：按 ObjC selector 直译成 `viewMatrixForOrientation(_:)` 编译不过。后两条是同一类错误的重演——**这是本项目第二次栽在"拿 ObjC 头文件符号名当 Swift 名直接抄"上**，且这次连累了本文档自己（§2.1、§2.5 两处原文都把 ObjC 名写成了看似可直接调用的形式）。没有交互式 Xcode 时的替代验证法：`swiftc -typecheck -sdk $(xcrun --sdk iphonesimulator --show-sdk-path) -target arm64-apple-ios17.0-simulator <file>.swift`，用真实 App target 会用到的 SDK/target 组合逐个符号试编译，效果等价于 Cmd-点进 generated interface，且可脚本化、可留存错误输出作为证据。
 
 ---
 
@@ -502,3 +504,4 @@ L.z = -0.3873    R.z = -0.3383    →  R 离镜头近 4.9cm
 | 2026-08-10 | 初版。基于 Xcode 26.6 / iOS SDK 26.5 全面核实，含 11 项待实测探针。 |
 | 2026-08-11 | 回填 iPad Pro M4 真机实测（§6.2）。三项阻塞性判定全部完成：眼位单位为米、相机空间 Z 为负、左右眼命名镜像。新增 P12/P13 两项探针。 |
 | 2026-08-11 | 发现 Apple 官方逐机型工程图纸（§6.3），摄像头坐标有权威来源。iPad Pro 11 M4 取得 ±0.2mm 精确值；灵动岛 iPhone 只给包络，X 无法确定。 |
+| 2026-08-12 | Plan 3 Task 2 实现中发现 §2.1、§2.5 两处原文把 ObjC 符号名误写成看似可直接调用的 Swift 形式，已订正并补进 §4 表：`AVDepthData.depthDataFromDictionaryRepresentation(_:)` 编译器报 unavailable，实为 `init(fromDictionaryRepresentation:)`；`PHPickerFilter.depthEffectPhotosFilter` 实为 `.depthEffectPhotos`。两条都用 `swiftc -typecheck` 对照 iphonesimulator SDK 实测确认。 |
