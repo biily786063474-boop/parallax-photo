@@ -6,6 +6,9 @@ import CoreMotion
 import simd
 import Observation
 import QuartzCore
+import PhotosUI
+import Photos
+import UniformTypeIdentifiers
 import ParallaxCore
 
 @main
@@ -23,6 +26,7 @@ struct ParallaxApp: App {
 /// 眼位的具体数值——这些数字是真机验收时判断"链路是否走通"的第一手证据。
 struct ParallaxView: View {
     @State private var poseController = PoseController(deviceProfile: Self.currentDeviceProfile())
+    @State private var showingPicker = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -36,6 +40,45 @@ struct ParallaxView: View {
                 .foregroundStyle(.white)
                 .padding(.top, 48)
                 .padding(.leading, 12)
+        }
+        // 选照片入口：右上角悬浮按钮，不引入 NavigationStack——现在这个全屏
+        // Metal 视图 + 状态文字叠层的首屏结构不该因为加一个按钮而改变。
+        .overlay(alignment: .topTrailing) {
+            Button {
+                showingPicker = true
+            } label: {
+                Image(systemName: "photo.on.rectangle")
+                    .font(.system(size: 18, weight: .medium))
+                    .padding(10)
+                    .background(.black.opacity(0.6), in: Circle())
+                    .foregroundStyle(.white)
+            }
+            .padding(.top, 44)
+            .padding(.trailing, 12)
+            .accessibilityLabel("选照片")
+        }
+        // 加载失败的可行动提示（简报要求：不是「加载失败」，而是解释原因 +
+        // 给出下一步）。与顶部 statusText 分开放：statusText 每帧刷新，
+        // 错误提示放在这里才不会被下一次 tick() 瞬间盖掉。
+        .overlay(alignment: .bottom) {
+            if let message = poseController.photoLoadMessage {
+                Text(message)
+                    .font(.system(.footnote))
+                    .multilineTextAlignment(.center)
+                    .padding(12)
+                    .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 10))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 32)
+                    .onTapGesture { poseController.dismissPhotoLoadMessage() }
+                    .transition(.opacity)
+            }
+        }
+        .sheet(isPresented: $showingPicker) {
+            PhotoPicker(
+                onFinish: { showingPicker = false },
+                onPick: { data in poseController.loadPhoto(from: data) }
+            )
         }
         .task { poseController.start() }
         .onDisappear { poseController.stop() }
@@ -88,6 +131,15 @@ final class PoseController: NSObject, ARSessionDelegate {
     var screen: ScreenGeometry { deviceProfile.screen }
 
     private(set) var statusText: String
+
+    /// Task 2：相册里选出的真实照片，`DepthPhotoLoader` 解码成功后存在这里。
+    /// 本任务不改渲染器，所以只负责把它填好；真正把它推给渲染器换素材、
+    /// 并清空这个槽位，是 Task 3 在 `tick()` 里加的那几行。
+    private(set) var pendingPhoto: (color: CGImage, depth: DepthMap)?
+
+    /// 加载失败时的可行动提示（简报要求：不能只说「加载失败」）。
+    /// 独立于 `statusText`——那个每帧刷新，装不下需要用户读完的句子。
+    private(set) var photoLoadMessage: String?
 
     /// 渲染器由 `MetalViewRepresentable.Coordinator` 强持有，这里只弱引用，
     /// 避免两边互相持有造成的生命周期纠缠——本对象不需要让 renderer 活着。
@@ -190,6 +242,34 @@ final class PoseController: NSObject, ARSessionDelegate {
         displayLink = nil
         session.pause()
         motionManager.stopDeviceMotionUpdates()
+    }
+
+    /// Task 2：把选中的相册照片解码成彩色图 + 深度图。
+    ///
+    /// HEIC 解压与深度反 padding 都不是免费的，挪到后台队列；`PoseController`
+    /// 是 `@Observable`，它的状态在这个 app 里全靠"只在主线程写"这条约定
+    /// 维持一致性（`tick()` 挂在 `CADisplayLink`、ARSessionDelegate 回调都在
+    /// 主线程），这里不能破例，所以解码完必须跳回主线程再写 `pendingPhoto`
+    /// / `photoLoadMessage`。
+    func loadPhoto(from data: Data) {
+        photoLoadMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = DepthPhotoLoader.load(from: data)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                guard let result else {
+                    // 可行动提示：说明原因 + 给出下一步，不是「加载失败」四个字了事
+                    // （简报「几个容易出错的地方」④）。
+                    self.photoLoadMessage = "这张照片没有深度信息，试试选一张用「人像」模式拍的照片"
+                    return
+                }
+                self.pendingPhoto = result
+            }
+        }
+    }
+
+    func dismissPhotoLoadMessage() {
+        photoLoadMessage = nil
     }
 
     /// 屏幕刷新节奏的心跳：状态机每帧都跑，不只在追踪丢失时跑。
@@ -344,5 +424,58 @@ struct MetalViewRepresentable: UIViewRepresentable {
 
     final class Coordinator {
         var renderer: ParallaxRenderer?
+    }
+}
+
+/// 相册选照片入口。`filter = .depthEffectPhotos`（iOS 16+，本 app 部署目标
+/// 17.0，恒可用）把列表从源头限制成"有景深效果"的照片，减少选完才发现
+/// 没有深度数据的挫败——即便如此，`DepthPhotoLoader` 仍会做完整校验，
+/// 因为 `photoDepthEffect` 只是"有景深效果"的旗标，不保证一定能解出可用
+/// 深度图（`docs/api-facts-arkit-depth.md` §2.5 的原话）。
+struct PhotoPicker: UIViewControllerRepresentable {
+    /// 用户选中或取消后，无论是否拿到数据都要调用——负责让 SwiftUI 侧的
+    /// `showingPicker` 变回 false。不能让 `PHPickerViewController` 自己
+    /// `dismiss(animated:)`：它是被 SwiftUI 的 `.sheet` 呈现出来的，
+    /// 自行 dismiss 不会同步 `showingPicker` 这个 `@State`，下次就弹不开了。
+    var onFinish: () -> Void
+    var onPick: (Data) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFinish: onFinish, onPick: onPick)
+    }
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var configuration = PHPickerConfiguration()
+        configuration.filter = .depthEffectPhotos
+        configuration.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: configuration)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        private let onFinish: () -> Void
+        private let onPick: (Data) -> Void
+
+        init(onFinish: @escaping () -> Void, onPick: @escaping (Data) -> Void) {
+            self.onFinish = onFinish
+            self.onPick = onPick
+        }
+
+        /// 用户选中一张、或点了取消，都会走到这里（取消时 `results` 为空）。
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            onFinish()
+            guard let provider = results.first?.itemProvider,
+                  provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
+            else { return }
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { [onPick] data, _ in
+                guard let data else { return }
+                // completion handler 不保证在主线程——`onPick` 最终会写
+                // `PoseController` 的 `@Observable` 状态，必须先跳回主线程。
+                DispatchQueue.main.async { onPick(data) }
+            }
+        }
     }
 }
