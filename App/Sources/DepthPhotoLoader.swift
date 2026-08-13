@@ -16,14 +16,19 @@ import ParallaxCore
 /// `AVDepthData(fromDictionaryRepresentation:)` → 按 EXIF 方向摆正、彩色图做
 /// 同样的摆正 → `CVPixelBuffer` 拷字节 → `DepthPixelUnpacking.unpack`（去
 /// `bytesPerRow` padding）→ `DepthNormalization.normalize`（统一到 [0,1]，
-/// 0=最远 1=最近）。
+/// 0=最远 1=最近）。彩色图摆正完成后再交给 `PersonMaskLoader.loadMask`
+/// 做人像/主体分割（Plan 4 Task 3）——喂给它的是摆正后的 `colorImage`，
+/// 不是摆正前的原图，理由见 `PersonMaskLoader.loadMask` 的文档注释。
 ///
 /// 任何一步失败都返回 `nil`，调用方（`ParallaxApp.swift`）负责把 `nil`
 /// 翻译成「这张照片没有深度信息，建议选人像模式拍的」这类可行动提示——
-/// 不在这里崩溃、也不在这里决定 UI 文案。
+/// 不在这里崩溃、也不在这里决定 UI 文案。**遮罩是例外**：分割失败或没有
+/// 可识别的主体不算整体加载失败——`mask` 字段传 `nil`，色图与深度图依然
+/// 正常返回，调用方（`ParallaxRenderer`）据此退回单层渲染,而不是拒绝
+/// 显示这张照片。
 enum DepthPhotoLoader {
 
-    static func load(from data: Data) -> (color: CGImage, depth: DepthMap)? {
+    static func load(from data: Data) -> (color: CGImage, depth: DepthMap, mask: MaskMap?)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
             print("DepthPhotoLoader: 无法解析图片数据（data.count=\(data.count)）")
             fflush(stdout)
@@ -64,7 +69,13 @@ enum DepthPhotoLoader {
             return nil
         }
 
-        return (colorImage, depthMap)
+        let mask = PersonMaskLoader.loadMask(cgImage: colorImage)
+        if mask == nil {
+            print("DepthPhotoLoader: 未取得分割遮罩（非人像/无可识别主体/Vision 失败），渲染将退回单层")
+            fflush(stdout)
+        }
+
+        return (colorImage, depthMap, mask)
     }
 
     // MARK: - 深度

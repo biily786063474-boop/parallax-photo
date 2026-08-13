@@ -196,7 +196,12 @@ final class PoseController: NSObject, ARSessionDelegate {
     /// Task 2：相册里选出的真实照片，`DepthPhotoLoader` 解码成功后存在这里。
     /// 本任务不改渲染器，所以只负责把它填好；真正把它推给渲染器换素材、
     /// 并清空这个槽位，是 Task 3 在 `tick()` 里加的那几行。
-    private(set) var pendingPhoto: (color: CGImage, depth: DepthMap)?
+    ///
+    /// Plan 4 Task 3：`DepthPhotoLoader.load` 的返回值加了 `mask` 字段，
+    /// 这里的元组类型跟着改——`mask` 字段本次先存好,真正让渲染器消费它、
+    /// 建两层素材是 Plan 4 Task 4 的范围（同一个道理：两次提交各自都要能
+    /// 独立编译通过，见 Task 2 时留下的这段注释历史）。
+    private(set) var pendingPhoto: (color: CGImage, depth: DepthMap, mask: MaskMap?)?
 
     /// 加载失败时的可行动提示（简报要求：不能只说「加载失败」）。
     /// 独立于 `statusText`——那个每帧刷新，装不下需要用户读完的句子。
@@ -346,6 +351,12 @@ final class PoseController: NSObject, ARSessionDelegate {
             motionManager.startDeviceMotionUpdates()
         }
 
+        // Plan 4 Task 3：Vision 的分割模型首次调用有 0.7–2.3s 冷启动，这里
+        // 尽早在后台把它预热掉，不等用户选照片才第一次触发（那样会在选完
+        // 照片后卡出一个肉眼可见的停顿）。`warmUp()` 自己派发到后台队列，
+        // 不阻塞这里，也不影响下面 ARSession 的启动时序。
+        PersonMaskLoader.warmUp()
+
         guard ARFaceTrackingConfiguration.isSupported else {
             statusText = "本机型不支持人脸追踪，使用 idle 演示"
             return
@@ -361,7 +372,9 @@ final class PoseController: NSObject, ARSessionDelegate {
         motionManager.stopDeviceMotionUpdates()
     }
 
-    /// Task 2：把选中的相册照片解码成彩色图 + 深度图。
+    /// Task 2：把选中的相册照片解码成彩色图 + 深度图（Plan 4 Task 3 起
+    /// 顺带附带分割遮罩，`mask` 可能是 `nil`——那不算这里的失败，见
+    /// `DepthPhotoLoader.load` 的文档注释）。
     ///
     /// **候选重试链（bug 修复）**：`candidates` 是 `PhotoPicker` 按优先级
     /// （HEIC → HEIF → 其他非 JPEG 具体类型 → 通用 `public.image`）依次取到的
