@@ -222,7 +222,7 @@ final class PoseController: NSObject, ARSessionDelegate {
     /// 默认值须与 `ParallaxRenderer.parallaxScale` 的初值一致，见 `renderer` 的
     /// `didSet`——那里负责把"默认值一致"这条假设真正落到实处，而不是两边
     /// 各自硬编码却指望它们碰巧相等。
-    var parallaxScale: Float = 0.06 {
+    var parallaxScale: Float = 0.125 {
         didSet { renderer?.parallaxScale = parallaxScale }
     }
 
@@ -230,7 +230,7 @@ final class PoseController: NSObject, ARSessionDelegate {
     /// 「伸出屏幕」还是「陷进屏幕」的观感占比，跟 parallaxScale 一样是需要
     /// 现场调的艺术参数，不是能提前猜准的常数。范围 `0...1` 对应
     /// `DepthMap` 的完整值域。
-    var zeroParallax: Float = 0.5 {
+    var zeroParallax: Float = 0.68 {
         didSet { renderer?.zeroParallax = zeroParallax }
     }
 

@@ -49,10 +49,10 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     /// 起点提到 6cm（3 倍），但这终究是要现场调的艺术参数，不猜一个"更大的
     /// 固定值"了事，真正的调节入口是 `PoseController.parallaxScale` 驱动的
     /// 底部滑块（见 ParallaxApp.swift）；这里的初值只是滑块归零前的默认状态。
-    var parallaxScale: Float = 0.06
+    var parallaxScale: Float = 0.125
     /// 零视差面所在的归一化深度。初值 0.5（深度中点），来自简报。同样接了
     /// 滑块（`PoseController.zeroParallax`），初值同理只是默认状态。
-    var zeroParallax: Float = 0.5
+    var zeroParallax: Float = 0.68
 
     /// 实际生效的 MSAA 样本数（1 或 4，取决于设备能力）。`pipelineState` 建立时
     /// 用的就是这个值；`MetalViewRepresentable.makeUIView` 必须把它同步到
