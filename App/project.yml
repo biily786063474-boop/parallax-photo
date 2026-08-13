@@ -1,0 +1,33 @@
+name: Parallax
+options:
+  bundleIdPrefix: com.biily.parallax
+  deploymentTarget: { iOS: "17.0" }
+  createIntermediateGroups: true
+targets:
+  Parallax:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    dependencies:
+      - package: ParallaxKit
+        product: ParallaxCore
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: 视差
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: >-
+          The front camera tracks your eye position on device so photos can shift
+          perspective as you move. Camera images are never saved or sent anywhere.
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+        # 同 Probe：ARSessionDelegate 未标 @MainActor、ARSession 非 Sendable，
+        # 用 Swift 5 语言模式避开严格并发在渲染循环里制造的摩擦。
+        # ParallaxCore 仍由 Package.swift 决定，跑在 Swift 6 严格模式下。
+        SWIFT_VERSION: "5.0"
+packages:
+  ParallaxKit:
+    path: ../ParallaxKit

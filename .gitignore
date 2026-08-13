@@ -8,3 +8,5 @@ xcuserdata/
 .build/
 Probe/*.xcodeproj/
 Probe/Info.plist
+App/*.xcodeproj/
+App/Info.plist
