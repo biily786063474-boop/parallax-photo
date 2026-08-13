@@ -21,9 +21,18 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     /// 必须与 `MTKView.depthStencilPixelFormat` 一致。
     static let depthPixelFormat: MTLPixelFormat = .depth32Float
 
-    /// 网格分辨率：128×128 顶点，spec 里两层 LDI 版本用 256×256，
-    /// 本任务只做单层链路验证，先用简报给定的密度。
-    private static let gridResolution = 128
+    /// 网格分辨率：256×256 顶点——spec §8.1 两层 LDI 版本用的就是这个密度，
+    /// 这里直接对齐。
+    ///
+    /// **真机反馈"锯齿严重"，从 128 提到 256 只是缓解，不是根治。** MSAA（见
+    /// `sampleCount`）平滑的是多边形边缘的光栅化锯齿；真机上明显的锯齿来自
+    /// 几何本身——128×128 网格铺满全屏后每个三角形横跨十几个像素，人像照片在
+    /// 轮廓处深度剧烈跳变，相邻顶点被推到差异很大的 z，三角形被拉成陡峭斜面，
+    /// 边缘就成了肉眼可见的阶梯，MSAA 对"网格本身就是阶梯状"无能为力。加密到
+    /// 256×256（顶点数 1.6 万→6.5 万，A16 毫无压力）让阶梯更密、更不易察觉，
+    /// 但阶梯的本质没有消失。真正的根治是 spec §8.1 描述的深度突变处按边缘遮罩
+    /// 剔除三角形 + matte alpha 羽化——那是独立的一大块工作，不在这次范围内。
+    private static let gridResolution = 256
     /// 程序化素材的像素尺寸。不必与网格分辨率一致——采样是双线性插值的连续函数。
     private static let sceneSize = 256
 
@@ -50,6 +59,11 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     /// `MTKView.sampleCount`——两边不一致会在 `draw(in:)` 创建 render command
     /// encoder 时直接崩溃，所以这里公开出去而不是锁在 private 里自己用。
     let sampleCount: Int
+
+    /// MSAA 运行时校验只打一次日志，见 `logMSAAVerificationIfNeeded`。
+    /// `draw(in:)` 每帧都跑（60Hz+），这个校验结果在运行期不会变，
+    /// 逐帧打印只会刷屏、不会带来新信息。
+    private var hasLoggedMSAAVerification = false
 
     private let screen: ScreenGeometry
     /// Task 3 起需要保留：`updateScene(color:depth:)` 换素材时要用同一个
@@ -339,12 +353,42 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     /// 不依赖 drawable 的像素尺寸——视口缩放由 Metal 按 drawable 尺寸自动处理。
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+    /// 真机上验证 4x MSAA 是否真的生效——"没崩"只能证明 `MTKView.sampleCount`
+    /// 与 pipeline 建立时用的 `rasterSampleCount` 彼此一致（不一致会在
+    /// `makeRenderCommandEncoder` 直接崩溃，见上面 `makePipelineState` 的注释），
+    /// 不能证明这个一致的值确实是 4 而不是设备不支持时退化后的 1。
+    ///
+    /// `MTLRenderPipelineState` 协议本身不暴露 `rasterSampleCount` 的回读接口
+    /// （查过 SDK 里的 MTLRenderPipeline.h：创建后只能设置、不能读回），没法
+    /// 直接断言 pipeline 那一侧；这里退而求其次，读运行期真正起作用的信号——
+    /// `MTKView.multisampleColorTexture`。按 MTKView.h 原文："If sampleCount is
+    /// greater than 1 a multisampled color texture will be created"、
+    /// "This will be nil if sampleCount is less than or equal to 1"——它是
+    /// MTKView 按当前 sampleCount 懒创建的真实 GPU 纹理，不是我们自己写入又读
+    /// 回的配置值，比回读 `view.sampleCount`（那只是配置项本身）更能证明 MSAA
+    /// 这一帧确实在起作用。放在 `currentRenderPassDescriptor` 访问之后调用：
+    /// 按同一份文档，访问它会顺带把 `multisampleColorTexture` 建出来。
+    private func logMSAAVerificationIfNeeded(view: MTKView) {
+        guard !hasLoggedMSAAVerification else { return }
+        hasLoggedMSAAVerification = true
+
+        let multisampleTexture = view.multisampleColorTexture
+        let actualSampleCount = multisampleTexture?.sampleCount ?? 1
+        let verdict = actualSampleCount == 4 ? "4x MSAA 确实生效" : "未达到 4x（本机型不支持，或被悄悄改回了 1）"
+        print("ParallaxRenderer: MSAA 校验 — renderer.sampleCount(建 pipeline 时用的值)=\(sampleCount)，"
+            + "MTKView.sampleCount=\(view.sampleCount)，"
+            + "multisampleColorTexture 实际 sampleCount=\(actualSampleCount)（\(verdict)）")
+        fflush(stdout)
+    }
+
     func draw(in view: MTKView) {
         guard let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor,
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)
         else { return }
+
+        logMSAAVerificationIfNeeded(view: view)
 
         let projection = OffAxisProjection.matrix(eye: eye, screen: screen, near: Self.near, far: Self.far)
 

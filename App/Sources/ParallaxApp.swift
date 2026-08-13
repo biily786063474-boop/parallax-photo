@@ -270,11 +270,22 @@ final class PoseController: NSObject, ARSessionDelegate {
 
     /// 上一次收到「已追踪」人脸锚点的时刻。超过 `trackingTimeout` 未更新就判定
     /// 追踪不可用（权限拒绝、脸移出画面、session 中断或失败都会走到这里）。
-    /// 这不是 spec 里定义的数值，是一个「宁可稍晚一点回落也不要因为一次眨眼
-    /// 就误判丢失」的工程判断，量级上跟 ViewerPoseStateMachine 默认的
-    /// 300ms 过渡时长相近。
+    ///
+    /// **真机反馈"切换卡顿"后从 0.5 降到 0.15（约 9 帧 @60Hz）。** 旧值的注释曾写
+    /// "不要因为一次眨眼就误判丢失"——这个顾虑站不住：ARKit 眨眼时
+    /// `ARFaceAnchor.isTracked` 照常为 true，真正让它变 false 的是脸移出画面、
+    /// 被遮挡、光线不足，眨眼根本走不到这条判定。旧值 0.5s 的实际后果是：追踪
+    /// 真的丢失后，这 0.5s 内 `isTracking` 仍为 true，喂给状态机的 `faceTracking`
+    /// 输入是冻结的旧眼位，画面完全静止；0.5s 后才开始 `ViewerPoseStateMachine`
+    /// 的 300ms 过渡——两段相加，用户看到约 0.8s 的异常期，前半段还是彻底不动，
+    /// 这就是"明显卡顿"的成因。
+    ///
+    /// 这层超时不该重复状态机已经做的平滑（`ViewerPoseStateMachine` 有 300ms
+    /// 交叉淡入，`rapidFlappingStaysBounded` 测试专门覆盖"快速反复丢失/恢复不
+    /// 振荡"），它只需要吸收「单帧漏检」这一类传感器噪声——0.15s 已经是 9 帧的
+    /// 余量。两层各司其职：这里挡瞬时噪声，观感上的平滑交给状态机负责。
     private var lastTrackedAt: Date?
-    private let trackingTimeout: TimeInterval = 0.5
+    private let trackingTimeout: TimeInterval = 0.15
 
     /// 状态文字限速到 10Hz，避免每次 `tick()`（屏幕刷新节奏，可达 60Hz+）都去
     /// 驱动 SwiftUI 重绘一行 Text——eye 本身仍然每次 `tick()` 都写进 renderer，
