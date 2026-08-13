@@ -77,7 +77,7 @@ struct ParallaxView: View {
         .sheet(isPresented: $showingPicker) {
             PhotoPicker(
                 onFinish: { showingPicker = false },
-                onPick: { data in poseController.loadPhoto(from: data) }
+                onPick: { candidates in poseController.loadPhoto(candidates: candidates) }
             )
         }
         .task { poseController.start() }
@@ -246,24 +246,49 @@ final class PoseController: NSObject, ARSessionDelegate {
 
     /// Task 2：把选中的相册照片解码成彩色图 + 深度图。
     ///
+    /// **候选重试链（bug 修复）**：`candidates` 是 `PhotoPicker` 按优先级
+    /// （HEIC → HEIF → 其他非 JPEG 具体类型 → 通用 `public.image`）依次取到的
+    /// 原始字节。真机反馈"选了人像照片仍提示没有深度"，根因大概率是旧代码
+    /// 只请求了通用类型 `public.image`——`NSItemProvider` 对通用类型可能返回
+    /// 转码后的"标准表示"（常见是 JPEG），转码会丢弃 disparity/depth 这类
+    /// 辅助数据。这里逐个候选尝试 `DepthPhotoLoader.load`，谁先解出深度就用谁，
+    /// 而不是只信第一个、失败就直接报错——用户不该为格式选择失误买单。
+    ///
     /// HEIC 解压与深度反 padding 都不是免费的，挪到后台队列；`PoseController`
     /// 是 `@Observable`，它的状态在这个 app 里全靠"只在主线程写"这条约定
     /// 维持一致性（`tick()` 挂在 `CADisplayLink`、ARSessionDelegate 回调都在
     /// 主线程），这里不能破例，所以解码完必须跳回主线程再写 `pendingPhoto`
     /// / `photoLoadMessage`。
-    func loadPhoto(from data: Data) {
+    func loadPhoto(candidates: [PhotoDataCandidate]) {
         photoLoadMessage = nil
+
+        guard !candidates.isEmpty else {
+            // PhotoPicker 连一种候选格式的原始字节都没取到——比"没有深度"更
+            // 基础的失败，消息要分开说，不然会误导用户去找"人像模式"。
+            photoLoadMessage = "无法读取这张照片的数据，请重新选择"
+            return
+        }
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = DepthPhotoLoader.load(from: data)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard let result else {
-                    // 可行动提示：说明原因 + 给出下一步，不是「加载失败」四个字了事
-                    // （简报「几个容易出错的地方」④）。
-                    self.photoLoadMessage = "这张照片没有深度信息，试试选一张用「人像」模式拍的照片"
+            for candidate in candidates {
+                print("PoseController: 尝试解码候选 \(candidate.typeIdentifier)（data.count=\(candidate.data.count)）")
+                fflush(stdout)
+                if let result = DepthPhotoLoader.load(from: candidate.data) {
+                    print("PoseController: \(candidate.typeIdentifier) 解出深度成功，采用该候选")
+                    fflush(stdout)
+                    DispatchQueue.main.async { self?.pendingPhoto = result }
                     return
                 }
-                self.pendingPhoto = result
+            }
+            print("PoseController: 全部 \(candidates.count) 个候选都未能解出深度数据")
+            fflush(stdout)
+            DispatchQueue.main.async {
+                // 可行动提示：说明原因 + 给出下一步，不是「加载失败」四个字了事
+                // （简报「几个容易出错的地方」④）。现在明确点出"试过几种格式"，
+                // 而不是笼统的"没有深度信息"——那句话在旧实现里其实经常是
+                // "格式选错了，压根没读到真正的深度数据"，不是照片真没有。
+                self?.photoLoadMessage = "这张照片没有可用的深度数据（已尝试 \(candidates.count) 种格式），"
+                    + "换一张用「人像」模式拍摄的照片试试"
             }
         }
     }
@@ -333,7 +358,14 @@ final class PoseController: NSObject, ARSessionDelegate {
         // 代码落地。推送后立刻清空，不然每帧都重新上传一遍纹理。
         if let photo = pendingPhoto {
             pendingPhoto = nil
-            renderer?.updateScene(color: photo.color, depth: photo.depth)
+            // updateScene 失败（纹理创建失败）此前只 print，用户只看到"选了照片但
+            // 画面没变"、没有任何解释（Plan 3 progress.md 记录的已知风险 ③）。
+            // renderer 为 nil 时（渲染器还没接好）不算这次失败，视为成功放过——
+            // 那是另一层生命周期时序问题，不在这次要修的范围内。
+            let succeeded = renderer?.updateScene(color: photo.color, depth: photo.depth) ?? true
+            if !succeeded {
+                photoLoadMessage = "这张照片解码成功，但显示失败，请重试"
+            }
         }
 
         updateStatusText(String(
@@ -438,6 +470,15 @@ struct MetalViewRepresentable: UIViewRepresentable {
     }
 }
 
+/// `PhotoPicker` 取到的一份候选原始字节，配上它对应的类型标识符。类型标识符
+/// 只用于日志/调试——真正决定"用哪个候选"的是
+/// `PoseController.loadPhoto(candidates:)` 里挨个尝试 `DepthPhotoLoader.load`，
+/// 谁先解出深度就用谁。
+struct PhotoDataCandidate {
+    let typeIdentifier: String
+    let data: Data
+}
+
 /// 相册选照片入口。`filter = .depthEffectPhotos`（iOS 16+，本 app 部署目标
 /// 17.0，恒可用）把列表从源头限制成"有景深效果"的照片，减少选完才发现
 /// 没有深度数据的挫败——即便如此，`DepthPhotoLoader` 仍会做完整校验，
@@ -449,7 +490,8 @@ struct PhotoPicker: UIViewControllerRepresentable {
     /// `dismiss(animated:)`：它是被 SwiftUI 的 `.sheet` 呈现出来的，
     /// 自行 dismiss 不会同步 `showingPicker` 这个 `@State`，下次就弹不开了。
     var onFinish: () -> Void
-    var onPick: (Data) -> Void
+    /// 按优先级排好序的候选数据，可能为空（一个候选都取不到时）。
+    var onPick: ([PhotoDataCandidate]) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onFinish: onFinish, onPick: onPick)
@@ -466,27 +508,121 @@ struct PhotoPicker: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) {}
 
+    /// 从 `NSItemProvider.registeredTypeIdentifiers` 里按优先级挑出候选类型。
+    ///
+    /// **这是这次 bug 修复的核心。** 旧代码只请求通用类型 `public.image`：
+    /// `NSItemProvider.loadDataRepresentation(forTypeIdentifier:)` 面对一个
+    /// 不是被直接注册、只是"conforms to"的通用类型时，系统可能返回转码后的
+    /// "标准表示"（常见是 JPEG），转码会丢弃 disparity/depth 这类辅助数据——
+    /// 照片本身没问题，是取数据的方式把深度弄丢了。优先请求具体格式（HEIC/
+    /// HEIF）能避免这次转码。
+    ///
+    /// 顺序：`public.heic` → `public.heif` → 其他非 `public.jpeg` 的具体图像
+    /// 类型（按 provider 声明的原始顺序）→ 兜底 `public.image`。故意不把
+    /// `public.jpeg` 单独列一档：JPEG 容器本身不带 Apple 的 disparity/depth
+    /// 辅助数据，前面的具体类型都试完仍失败时，最后一档 `public.image` 兜底
+    /// 自然会解析到它——不需要为它重复一次。
+    ///
+    /// HEIC/HEIF 用原始 UTI 字符串而不是 `UTType.heic`/`UTType.heif`：本项目已经
+    /// 三次栽在"Swift 符号名跟 ObjC 直觉拼写不一致"上（见
+    /// `docs/api-facts-arkit-depth.md` §4），这两个值只是拿来跟
+    /// `registeredTypeIdentifiers` 里的原始字符串做字符串比较，没有必要
+    /// 依赖一个本文档尚未逐个编译验证过的 Swift 静态成员名。
+    static func candidateTypeIdentifiers(from registered: [String]) -> [String] {
+        let heic = "public.heic"
+        let heif = "public.heif"
+        let jpeg = "public.jpeg"
+        let genericImage = UTType.image.identifier
+
+        var candidates: [String] = []
+        let registeredSet = Set(registered)
+
+        func addIfPresent(_ identifier: String) {
+            guard registeredSet.contains(identifier), !candidates.contains(identifier) else { return }
+            candidates.append(identifier)
+        }
+
+        addIfPresent(heic)
+        addIfPresent(heif)
+
+        for identifier in registered {
+            guard identifier != jpeg,
+                  identifier != genericImage,
+                  !candidates.contains(identifier),
+                  let type = UTType(identifier),
+                  type.conforms(to: .image)
+            else { continue }
+            candidates.append(identifier)
+        }
+
+        addIfPresent(genericImage)
+
+        return candidates
+    }
+
     final class Coordinator: NSObject, PHPickerViewControllerDelegate {
         private let onFinish: () -> Void
-        private let onPick: (Data) -> Void
+        private let onPick: ([PhotoDataCandidate]) -> Void
 
-        init(onFinish: @escaping () -> Void, onPick: @escaping (Data) -> Void) {
+        init(onFinish: @escaping () -> Void, onPick: @escaping ([PhotoDataCandidate]) -> Void) {
             self.onFinish = onFinish
             self.onPick = onPick
         }
 
         /// 用户选中一张、或点了取消，都会走到这里（取消时 `results` 为空）。
+        ///
+        /// 诊断日志（真机排查"选了人像照片却没有深度"用，print + fflush(stdout)，
+        /// 配 `devicectl device process launch --console` 读）：
+        /// - `registeredTypeIdentifiers`：最关键的一行，决定了下面能试到哪些候选
+        /// - 每个候选各自的 data.count / error / 前 12 字节十六进制都单独打印，
+        ///   用来对照 magic number 判断到底拿到的是 HEIC（offset 4 起 `66 74 79
+        ///   70` = "ftyp"）还是 JPEG（`ff d8 ff` 开头）
         func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
             onFinish()
-            guard let provider = results.first?.itemProvider,
-                  provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
-            else { return }
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { [onPick] data, _ in
-                guard let data else { return }
-                // completion handler 不保证在主线程——`onPick` 最终会写
-                // `PoseController` 的 `@Observable` 状态，必须先跳回主线程。
-                DispatchQueue.main.async { onPick(data) }
+            guard let provider = results.first?.itemProvider else { return }
+
+            let registered = provider.registeredTypeIdentifiers
+            print("PhotoPicker: registeredTypeIdentifiers=\(registered)")
+            fflush(stdout)
+
+            let candidateIdentifiers = PhotoPicker.candidateTypeIdentifiers(from: registered)
+            guard !candidateIdentifiers.isEmpty else {
+                print("PhotoPicker: registeredTypeIdentifiers 里没有可用的图像类型，放弃加载")
+                fflush(stdout)
+                onPick([])
+                return
             }
+
+            // 按优先级顺序依次请求；每一步都是异步回调，用嵌套函数递归而不是
+            // 并发发起——候选通常只有 1 个（真正的人像 HEIC 照片一般就注册这一种
+            // 具体类型），递归的额外开销可以忽略不计，换来顺序有保证、日志好读。
+            func attempt(index: Int, collected: [PhotoDataCandidate]) {
+                guard index < candidateIdentifiers.count else {
+                    // completion handler 不保证在主线程——`onPick` 最终会写
+                    // `PoseController` 的 `@Observable` 状态，必须先跳回主线程。
+                    // `[onPick]` 显式捕获：这是转义闭包，编译器要求显式 self/捕获，
+                    // 与原代码 `loadDataRepresentation` 那个尾随闭包的写法一致。
+                    DispatchQueue.main.async { [onPick] in onPick(collected) }
+                    return
+                }
+                let identifier = candidateIdentifiers[index]
+                print("PhotoPicker: 请求类型 [\(index + 1)/\(candidateIdentifiers.count)] \(identifier)")
+                fflush(stdout)
+                provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, error in
+                    var next = collected
+                    if let data {
+                        let magic = data.prefix(12).map { String(format: "%02x", $0) }.joined(separator: " ")
+                        print("PhotoPicker: \(identifier) data.count=\(data.count) error=\(String(describing: error)) magic=[\(magic)]")
+                        fflush(stdout)
+                        next.append(PhotoDataCandidate(typeIdentifier: identifier, data: data))
+                    } else {
+                        print("PhotoPicker: \(identifier) 未取到数据 error=\(String(describing: error))")
+                        fflush(stdout)
+                    }
+                    attempt(index: index + 1, collected: next)
+                }
+            }
+            attempt(index: 0, collected: [])
         }
     }
 }

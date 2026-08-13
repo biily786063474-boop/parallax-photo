@@ -25,18 +25,32 @@ enum DepthPhotoLoader {
 
     static func load(from data: Data) -> (color: CGImage, depth: DepthMap)? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
-            print("DepthPhotoLoader: 无法解析图片数据")
+            print("DepthPhotoLoader: 无法解析图片数据（data.count=\(data.count)）")
+            fflush(stdout)
             return nil
         }
+
+        // 诊断：实际拿到的容器是什么类型、里面有几张图、主图是第几张——用来
+        // 判断 PhotoPicker 那一侧喂进来的到底是 HEIC 原始容器（多图、
+        // containerType = public.heic）还是被转码过的东西（转码后通常是单图
+        // JPEG，containerType = public.jpeg，imageCount = 1）。真机排查
+        // "选了人像照片却没有深度"从这一行日志开始看。
+        let containerType = (CGImageSourceGetType(source) as String?) ?? "nil"
+        let imageCount = CGImageSourceGetCount(source)
         let primaryIndex = CGImageSourceGetPrimaryImageIndex(source)
+        print("DepthPhotoLoader: containerType=\(containerType) imageCount=\(imageCount) "
+            + "primaryIndex=\(primaryIndex) data.count=\(data.count)")
+        fflush(stdout)
 
         guard let rawColorImage = CGImageSourceCreateImageAtIndex(source, primaryIndex, nil) else {
             print("DepthPhotoLoader: 无法解出彩色图")
+            fflush(stdout)
             return nil
         }
 
         guard let depthMap = loadDepthMap(source: source, primaryIndex: primaryIndex) else {
             print("DepthPhotoLoader: 这张照片没有可用的深度数据")
+            fflush(stdout)
             return nil
         }
 
@@ -46,6 +60,7 @@ enum DepthPhotoLoader {
         let orientation = exifOrientation(source: source, primaryIndex: primaryIndex) ?? .up
         guard let colorImage = orientedCGImage(rawColorImage, exifOrientation: orientation) else {
             print("DepthPhotoLoader: 彩色图方向摆正失败")
+            fflush(stdout)
             return nil
         }
 
@@ -57,6 +72,9 @@ enum DepthPhotoLoader {
     private static func loadDepthMap(source: CGImageSource, primaryIndex: Int) -> DepthMap? {
         guard let auxDict = auxiliaryDataDictionary(source: source, primaryIndex: primaryIndex) else {
             // 常规原因：这张照片不是人像模式拍的，没有内嵌 disparity/depth。
+            // 也可能是"确实是人像照，但取数据的方式把 aux 数据弄丢了"——
+            // 上一行的 portraitMatteAux 诊断能帮着分辨这两种情况：matte 若为
+            // true 说明系统认定这是人像照，深度理应存在。
             return nil
         }
 
@@ -65,6 +83,7 @@ enum DepthPhotoLoader {
         // iphonesimulator SDK 实测确认（编译器是唯一裁判）。
         guard let rawDepthData = try? AVDepthData(fromDictionaryRepresentation: auxDict) else {
             print("DepthPhotoLoader: AVDepthData 构造失败")
+            fflush(stdout)
             return nil
         }
 
@@ -73,6 +92,7 @@ enum DepthPhotoLoader {
 
         guard let (kind, format) = classify(depthDataType: depthData.depthDataType) else {
             print("DepthPhotoLoader: 未识别的深度像素格式 \(depthData.depthDataType)")
+            fflush(stdout)
             return nil
         }
 
@@ -97,6 +117,7 @@ enum DepthPhotoLoader {
             bytes: bytes, format: format, width: width, height: height, bytesPerRow: bytesPerRow
         ) else {
             print("DepthPhotoLoader: 深度像素解包失败（尺寸或 bytesPerRow 不合法）")
+            fflush(stdout)
             return nil
         }
 
@@ -108,11 +129,25 @@ enum DepthPhotoLoader {
     private static func auxiliaryDataDictionary(
         source: CGImageSource, primaryIndex: Int
     ) -> [AnyHashable: Any]? {
-        let raw = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+        // disparity 与 depth 分开查、分开打日志，不合并成一次 `??` 短路——
+        // 否则真机上出问题时没法区分"两种 aux 都没有"还是"取到了但后面的类型
+        // 判断/构造环节出了别的问题"。顺带查一下 portraitEffectsMatte：
+        // 有 matte 说明这确实是人像照，深度也该在，能帮着定位是不是数据在
+        // PhotoPicker 那一侧就已经丢了。
+        let disparityInfo = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
             source, primaryIndex, kCGImageAuxiliaryDataTypeDisparity
-        ) ?? CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+        )
+        let depthInfo = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
             source, primaryIndex, kCGImageAuxiliaryDataTypeDepth
         )
+        let matteInfo = CGImageSourceCopyAuxiliaryDataInfoAtIndex(
+            source, primaryIndex, kCGImageAuxiliaryDataTypePortraitEffectsMatte
+        )
+        print("DepthPhotoLoader: disparityAux=\(disparityInfo != nil) "
+            + "depthAux=\(depthInfo != nil) portraitMatteAux=\(matteInfo != nil)")
+        fflush(stdout)
+
+        let raw = disparityInfo ?? depthInfo
         return raw as? [AnyHashable: Any]
     }
 
