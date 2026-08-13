@@ -325,6 +325,17 @@ final class PoseController: NSObject, ARSessionDelegate {
         let eye = poseStateMachine.update(inputs, now: elapsed)
 
         renderer?.eye = eye
+
+        // Task 3：渲染器已经能换素材了，这里把 loadPhoto(from:) 存好的结果
+        // 推过去。放在 tick() 而不是加载完成的那一刻直接推，是因为 Task 2
+        // 提交时渲染器还没有 updateScene(color:depth:) 这个方法——两次提交
+        // 各自都要能独立编译通过，所以中转槽位（pendingPhoto）先于消费它的
+        // 代码落地。推送后立刻清空，不然每帧都重新上传一遍纹理。
+        if let photo = pendingPhoto {
+            pendingPhoto = nil
+            renderer?.updateScene(color: photo.color, depth: photo.depth)
+        }
+
         updateStatusText(String(
             format: "%@ · eye=(%.3f, %.3f, %.3f)m",
             statusLabel(for: poseStateMachine.activeSource), eye.x, eye.y, eye.z

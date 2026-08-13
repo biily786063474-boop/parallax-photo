@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import MetalKit
+import CoreGraphics
 import simd
 import ParallaxCore
 
@@ -40,6 +41,9 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     var zeroParallax: Float = 0.5
 
     private let screen: ScreenGeometry
+    /// Task 3 起需要保留：`updateScene(color:depth:)` 换素材时要用同一个
+    /// device 重新建纹理，不能只在 `init` 里用完就丢。
+    private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLRenderPipelineState
     private let depthStencilState: MTLDepthStencilState
@@ -48,8 +52,11 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     private let indexBuffer: MTLBuffer
     private let indexCount: Int
 
-    private let colorTexture: MTLTexture
-    private let depthTexture: MTLTexture
+    /// Task 3 起可替换：启动时是 `SyntheticScene` 建的程序化素材，
+    /// `updateScene(color:depth:)` 换成相册照片后指向新纹理。
+    /// `draw(in:)` 只管读当前值，不关心它是哪一次换的。
+    private var colorTexture: MTLTexture
+    private var depthTexture: MTLTexture
 
     /// 与 `Shaders.metal` 里的 `Uniforms` 逐字段对应，包括顺序。
     ///
@@ -76,6 +83,7 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     /// 调用方可以退化成一个不渲染但不崩溃的视图。
     init?(device: MTLDevice, screen: ScreenGeometry) {
         self.screen = screen
+        self.device = device
         self.eye = SIMD3(0, 0, 0.35)
 
         guard let queue = device.makeCommandQueue() else { return nil }
@@ -117,6 +125,36 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
         self.depthStencilState = depthState
 
         super.init()
+    }
+
+    // MARK: - 换素材（Task 3）
+
+    /// 换素材：彩色图 + 深度图各自建新纹理，替换当前正在渲染的一对。
+    ///
+    /// 任何一步失败都保留原素材不动——延续 `init?` 的"失败即返回而不是崩溃"
+    /// 原则，只是运行期已经过了能返回 nil 的阶段，所以改成"不换"：不能让
+    /// 一次失败的照片加载把已经在动的画面砸成黑屏。
+    ///
+    /// `parallaxScale`/`zeroParallax` 本次有意不跟着换图重算：程序化条纹的
+    /// 深度是满量程分层，真实照片的深度分布集中得多，两者需要的强度大概率
+    /// 不一样，但具体数值是肉眼参数，等真机拿真实照片试出手感后再调，
+    /// 不在这里猜。
+    ///
+    /// - Returns: 是否真的换成了新素材；调用方目前只用它来决定要不要打日志，
+    ///   不是必须处理的错误。
+    @discardableResult
+    func updateScene(color: CGImage, depth: DepthMap) -> Bool {
+        guard let newColorTexture = Self.makeColorTexture(device: device, cgImage: color) else {
+            print("ParallaxRenderer: 彩色纹理创建失败，保留原素材")
+            return false
+        }
+        guard let newDepthTexture = Self.makeDepthTexture(device: device, depth: depth) else {
+            print("ParallaxRenderer: 深度纹理创建失败，保留原素材")
+            return false
+        }
+        colorTexture = newColorTexture
+        depthTexture = newDepthTexture
+        return true
     }
 
     // MARK: - 网格与纹理构建
@@ -189,6 +227,49 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
             )
         }
         return texture
+    }
+
+    /// 从相册照片解出的 `CGImage` 建纹理（Task 3）。
+    ///
+    /// `CGImage` 自己的 `bytesPerRow` 同样可能有 padding——跟 Task 1 里
+    /// `CVPixelBuffer` 是同一类坑，只是这次不用手写反 padding，直接用
+    /// `CGContext` 把它重绘到一份自己指定 `bytesPerRow`（= width×4，
+    /// 定义上就不会有 padding）的缓冲最省事，再复用上面基于 `[UInt8]`
+    /// 的重载上传。
+    ///
+    /// 字节序：`CGImageAlphaInfo.premultipliedLast` 配 8-bit-per-component
+    /// + deviceRGB，在内存里就是 R,G,B,A 顺序——已经用一张纯红 1×1 图在
+    /// Mac 上实际跑过验证（不只是编译通过），跟 `.rgba8Unorm` 纹理格式、
+    /// `SyntheticScene` 的通道约定完全一致，不需要额外交换红蓝通道。
+    private static func makeColorTexture(device: MTLDevice, cgImage: CGImage) -> MTLTexture? {
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+
+        // CGContext 必须在这个闭包内创建并完成绘制：`raw.baseAddress` 只在
+        // withUnsafeMutableBytes 的闭包期间保证有效，绘制动作不能挪到外面。
+        let drew: Bool = pixels.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress,
+                  let context = CGContext(
+                    data: base,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  )
+            else { return false }
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else { return nil }
+
+        return makeColorTexture(device: device, pixels: pixels, width: width, height: height)
     }
 
     /// depth 用 `.r32Float`——深度值是 `SyntheticScene`/`DepthMap` 已经归一化到
