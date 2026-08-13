@@ -32,9 +32,24 @@ public struct IdlePoseGenerator: Sendable {
         self.periodY = periodY
     }
 
-    public func pose(at time: TimeInterval) -> SIMD3<Float> {
+    /// 相对锚点的摆动偏移，不含锚点本身。t=0 时为零向量（两轴 sin(0)=0）。
+    public func offset(at time: TimeInterval) -> SIMD3<Float> {
         let x = amplitude.x * Float(sin(2 * Double.pi * time / periodX))
         let y = amplitude.y * Float(sin(2 * Double.pi * time / periodY))
-        return SIMD3(x, y, distance)
+        return SIMD3(x, y, 0)
+    }
+
+    /// 绕指定锚点摆动。这是追踪丢失后该用的形式——
+    /// 摆动是对「最后已知眼位」的补充，不是回到屏幕中心重新开始。
+    ///
+    /// t=0 时精确等于 anchor：接管的瞬间不产生任何位移，
+    /// 后续的可见偏移全部来自 offset(at:) 本身，不叠加额外的跳变。
+    public func pose(at time: TimeInterval, around anchor: SIMD3<Float>) -> SIMD3<Float> {
+        anchor + offset(at: time)
+    }
+
+    /// 既有形式：绕默认锚点（屏幕正前方 distance 处）摆动。
+    public func pose(at time: TimeInterval) -> SIMD3<Float> {
+        pose(at: time, around: SIMD3(0, 0, distance))
     }
 }

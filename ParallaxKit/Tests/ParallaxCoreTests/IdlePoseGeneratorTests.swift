@@ -59,4 +59,63 @@ struct IdlePoseGeneratorTests {
         #expect(abs(pose.x) < 1e-6)
         #expect(abs(pose.y) < 1e-6)
     }
+
+    // MARK: - 锚点支持（追踪丢失后应绕最后已知眼位摆动，而不是绕屏幕中心）
+
+    @Test("offset(at: 0) 是零向量——李萨如两轴都从 sin(0)=0 出发")
+    func offsetAtZeroIsZeroVector() {
+        let offset = Self.generator.offset(at: 0)
+        #expect(offset == SIMD3<Float>(0, 0, 0))
+    }
+
+    @Test("绕锚点摆动时，t=0 精确落在锚点上：接管瞬间不产生任何位移")
+    func poseAroundAnchorStartsExactlyAtAnchorAtTimeZero() {
+        let anchor = SIMD3<Float>(0.12, -0.08, 0.42)
+        let pose = Self.generator.pose(at: 0, around: anchor)
+        #expect(pose == anchor)
+    }
+
+    @Test("绕锚点摆动 == 锚点 + offset")
+    func poseAroundAnchorEqualsAnchorPlusOffset() {
+        let g = Self.generator
+        let anchor = SIMD3<Float>(0.1, 0.05, 0.5)
+        for step in 0..<200 {
+            let t = TimeInterval(step) * 0.037
+            let pose = g.pose(at: t, around: anchor)
+            let expected = anchor + g.offset(at: t)
+            #expect(simd_length(pose - expected) < 1e-6)
+        }
+    }
+
+    @Test("既有 pose(at:) 等价于绕屏幕正前方 distance 处摆动")
+    func defaultPoseEquivalentToAroundDefaultAnchor() {
+        let g = Self.generator
+        let defaultAnchor = SIMD3<Float>(0, 0, g.distance)
+        for step in 0..<200 {
+            let t = TimeInterval(step) * 0.053
+            let viaDefault = g.pose(at: t)
+            let viaAnchor = g.pose(at: t, around: defaultAnchor)
+            #expect(simd_length(viaDefault - viaAnchor) < 1e-6)
+        }
+    }
+
+    @Test("绕任意锚点摆动时，偏移量仍在振幅范围内")
+    func offsetStaysWithinAmplitudeRegardlessOfAnchor() {
+        let g = IdlePoseGenerator(amplitude: SIMD2(0.04, 0.03), distance: 0.35)
+        let anchors: [SIMD3<Float>] = [
+            SIMD3(0, 0, 0.35),
+            SIMD3(1.0, -0.5, 2.0),
+            SIMD3(-3.2, 4.1, 0.1),
+        ]
+        for anchor in anchors {
+            for step in 0..<500 {
+                let t = TimeInterval(step) * 0.05
+                let pose = g.pose(at: t, around: anchor)
+                let delta = pose - anchor
+                #expect(abs(delta.x) <= 0.04 + 1e-6)
+                #expect(abs(delta.y) <= 0.03 + 1e-6)
+                #expect(delta.z == 0)
+            }
+        }
+    }
 }

@@ -54,12 +54,15 @@ struct ParallaxView: View {
 
 /// 观察者位置控制器：ARKit 眼位追踪 → 屏幕空间眼位，追踪不可用时用 idle 兜底。
 ///
-/// **本任务的降级范围**：只做「追踪可用就用它，否则用 idle」的硬切换，
-/// **不**接入 `ParallaxCore` 里已经写好的 `ViewerPoseStateMachine`（四级降级链
-/// + 300ms 交叉淡入）——那是 spec §9 的完整效果。这个类型没有出现在
-/// 本任务要用到的接口列表里，是有意排除：Task 3 的目标是验证「ARKit 眼位 →
-/// 离轴投影 → Metal 上屏」这条链路本身能不能走通，不是做最终的降级体验；
-/// 硬切换在真机上会有一次可见的跳变，接入交叉淡入留给后续任务。
+/// 接入了 `ParallaxCore` 的 `ViewerPoseStateMachine`（四级降级链 + 300ms
+/// 交叉淡入）。本阶段只喂 `faceTracking` 与 `idle` 两路，`motion`／`manual`
+/// 传 `nil`——陀螺仪与手势不在这次修复范围内，留给后续任务。
+///
+/// idle 不再绕屏幕中心摆动，而是绕 `idleAnchor`：最后一次拿到有效人脸眼位
+/// 时的位置。追踪一丢，`tick()` 里的 idle 分支从这个锚点接着摆，状态机再把
+/// 它和丢失前的输出做 300ms 交叉淡入——两件事缺一都会跳：只做交叉淡入不挪
+/// 锚点，淡入的终点仍然在屏幕中心附近，跟用户实际所在位置脱节；只挪锚点不
+/// 做交叉淡入，退回硬切换，那一下瞬跳还在。
 @Observable
 final class PoseController: NSObject, ARSessionDelegate {
 
@@ -79,6 +82,22 @@ final class PoseController: NSObject, ARSessionDelegate {
     private let idleGenerator = IdlePoseGenerator()
     private let startTime = Date()
 
+    /// 降级链状态机：源切换时做 300ms 交叉淡入，见类型上方注释。
+    private var poseStateMachine = ViewerPoseStateMachine()
+
+    /// idle 摆动锚点。每次 ARKit 给出有效眼位就更新（见
+    /// `session(_:didUpdate:)`），追踪丢失后 `tick()` 绕它继续摆，
+    /// 而不是绕屏幕中心——这是本次要修的 bug 本体。
+    ///
+    /// 初值取 `idleGenerator` 的默认锚点（屏幕正前方 distance 处），
+    /// 因为 app 启动瞬间、第一次拿到人脸之前，没有「最后已知眼位」可用。
+    private var idleAnchor: SIMD3<Float>
+
+    /// ARKit 最近一次给出的、已滤波夹紧过的眼位。是否仍然「新鲜」由
+    /// `lastTrackedAt` + `trackingTimeout` 判定，不在这里判断——
+    /// 单一判据，避免两处逻辑各算一遍而慢慢对不上。
+    private var latestFaceEye: SIMD3<Float>?
+
     /// 上一次收到「已追踪」人脸锚点的时刻。超过 `trackingTimeout` 未更新就判定
     /// 追踪不可用（权限拒绝、脸移出画面、session 中断或失败都会走到这里）。
     /// 这不是 spec 里定义的数值，是一个「宁可稍晚一点回落也不要因为一次眨眼
@@ -87,8 +106,9 @@ final class PoseController: NSObject, ARSessionDelegate {
     private var lastTrackedAt: Date?
     private let trackingTimeout: TimeInterval = 0.5
 
-    /// 状态文字限速到 10Hz，避免 ARKit 60Hz 回调与屏幕刷新的 tick 都去驱动
-    /// SwiftUI 重绘一行 Text——眼位本身仍然每次回调都写进 renderer，不受影响。
+    /// 状态文字限速到 10Hz，避免每次 `tick()`（屏幕刷新节奏，可达 60Hz+）都去
+    /// 驱动 SwiftUI 重绘一行 Text——eye 本身仍然每次 `tick()` 都写进 renderer，
+    /// 不受这个限速影响。
     private var lastStatusTextUpdate: TimeInterval = 0
     private let statusTextInterval: TimeInterval = 0.1
 
@@ -96,6 +116,7 @@ final class PoseController: NSObject, ARSessionDelegate {
 
     init(deviceProfile: DeviceProfile) {
         self.deviceProfile = deviceProfile
+        self.idleAnchor = SIMD3(0, 0, idleGenerator.distance)
         self.statusText = "机型 \(deviceProfile.displayName)"
             + "（\(deviceProfile.isCalibrated ? "已校准" : "未校准")）· 启动中…"
         super.init()
@@ -123,18 +144,44 @@ final class PoseController: NSObject, ARSessionDelegate {
         session.pause()
     }
 
-    /// 屏幕刷新节奏的心跳：追踪可用时什么都不做（眼位由下面的
-    /// `ARSessionDelegate` 回调直接写 renderer），追踪不可用时驱动 idle 摆动。
+    /// 屏幕刷新节奏的心跳：状态机每帧都跑，不只在追踪丢失时跑。
+    ///
+    /// 这是接入 `ViewerPoseStateMachine` 的关键：交叉淡入需要知道「丢失前
+    /// 输出到了哪」，只有让状态机在追踪期间也持续被喂 `faceTracking` 输入，
+    /// 它内部的 `lastOutput` 才会跟着人脸位置走；如果像之前那样追踪时完全
+    /// 不调用它，它就没有连续的起点可淡出，第一次调用只会是"首次落地"
+    /// （见 `ViewerPoseStateMachine.update` 对 `lastOutput == nil` 的处理），
+    /// 等于又变回硬切换。
+    ///
+    /// `elapsed` 是自 app 启动起单调递增的同一个时钟，同时喂给 idle 生成器
+    /// 和状态机——不在切换瞬间重置，摆动的相位才不会跟着源切换抖一下。
     @objc private func tick() {
-        let isTracking = lastTrackedAt.map { Date().timeIntervalSince($0) < trackingTimeout } ?? false
-        guard !isTracking else { return }
-
         let elapsed = Date().timeIntervalSince(startTime)
-        let idleEye = idleGenerator.pose(at: elapsed)
-        renderer?.eye = idleEye
+        let isTracking = lastTrackedAt.map { Date().timeIntervalSince($0) < trackingTimeout } ?? false
+
+        let idleEye = idleGenerator.pose(at: elapsed, around: idleAnchor)
+        let inputs = ViewerPoseInputs(
+            faceTracking: isTracking ? latestFaceEye : nil,
+            motion: nil,
+            manual: nil,
+            idle: idleEye
+        )
+        let eye = poseStateMachine.update(inputs, now: elapsed)
+
+        renderer?.eye = eye
         updateStatusText(String(
-            format: "idle 摆动中 · eye=(%.3f, %.3f, %.3f)m", idleEye.x, idleEye.y, idleEye.z
+            format: "%@ · eye=(%.3f, %.3f, %.3f)m",
+            statusLabel(for: poseStateMachine.activeSource), eye.x, eye.y, eye.z
         ))
+    }
+
+    private func statusLabel(for source: ViewerPoseSourceKind) -> String {
+        switch source {
+        case .faceTracking: return "追踪中"
+        case .idle: return "idle 摆动中"
+        case .motion: return "陀螺仪"
+        case .manual: return "手动拖动"
+        }
     }
 
     // MARK: - ARSessionDelegate
@@ -166,10 +213,13 @@ final class PoseController: NSObject, ARSessionDelegate {
         let clamped = budget.clamp(smoothed)
 
         lastTrackedAt = Date()
-        renderer?.eye = clamped
-        updateStatusText(String(
-            format: "追踪中 · eye=(%.3f, %.3f, %.3f)m", clamped.x, clamped.y, clamped.z
-        ))
+        latestFaceEye = clamped
+        // 每次拿到有效眼位就搬一次 idle 锚点：追踪一旦丢失，idle 从这里接着摆，
+        // 不会跑回屏幕中心。这是本次要修的 bug 本体，见类型注释。
+        idleAnchor = clamped
+
+        // 不在这里写 renderer.eye / statusText——统一交给 tick() 里的状态机
+        // 计算并写入。两条写入路径各写各的，正是之前硬切换 bug 的成因。
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -187,7 +237,7 @@ final class PoseController: NSObject, ARSessionDelegate {
 }
 
 /// 把 `MTKView` 接进 SwiftUI，并把渲染器交给 `PoseController` 的弱引用，
-/// 让 ARKit / idle 回调能直接写 `renderer.eye`。
+/// 让 `tick()` 里状态机算出的结果能直接写 `renderer.eye`。
 struct MetalViewRepresentable: UIViewRepresentable {
     let poseController: PoseController
 
