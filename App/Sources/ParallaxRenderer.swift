@@ -35,10 +35,21 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
     /// 渲染器只读它，不做平滑、不做夹紧——那些都已经在写入前做完了。
     var eye: SIMD3<Float>
 
-    /// 视差强度：归一化深度差 → 米。初值 2cm，来自简报。
-    var parallaxScale: Float = 0.02
-    /// 零视差面所在的归一化深度。初值 0.5（深度中点），来自简报。
+    /// 视差强度：归一化深度差 → 米。真机反馈初值 2cm 幅度太小、看不出空间感——
+    /// 真实照片归一化后的深度差常只有 0.2~0.4，乘 2cm 实际位移只剩几毫米。
+    /// 起点提到 6cm（3 倍），但这终究是要现场调的艺术参数，不猜一个"更大的
+    /// 固定值"了事，真正的调节入口是 `PoseController.parallaxScale` 驱动的
+    /// 底部滑块（见 ParallaxApp.swift）；这里的初值只是滑块归零前的默认状态。
+    var parallaxScale: Float = 0.06
+    /// 零视差面所在的归一化深度。初值 0.5（深度中点），来自简报。同样接了
+    /// 滑块（`PoseController.zeroParallax`），初值同理只是默认状态。
     var zeroParallax: Float = 0.5
+
+    /// 实际生效的 MSAA 样本数（1 或 4，取决于设备能力）。`pipelineState` 建立时
+    /// 用的就是这个值；`MetalViewRepresentable.makeUIView` 必须把它同步到
+    /// `MTKView.sampleCount`——两边不一致会在 `draw(in:)` 创建 render command
+    /// encoder 时直接崩溃，所以这里公开出去而不是锁在 private 里自己用。
+    let sampleCount: Int
 
     private let screen: ScreenGeometry
     /// Task 3 起需要保留：`updateScene(color:depth:)` 换素材时要用同一个
@@ -110,7 +121,15 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
         self.colorTexture = colorTex
         self.depthTexture = depthTex
 
-        guard let pipeline = Self.makePipelineState(device: device) else { return nil }
+        // 4x MSAA 抗锯齿：网格边缘（尤其深度突变处的三角形边）在没有多重采样
+        // 时锯齿明显（真机反馈②）。`supportsTextureSampleCount` 是设备能力查询，
+        // 不是"是否会崩"的赌注——查完就知道，不支持就老老实实退化回 1，
+        // 好过赌一个所有 Metal 设备事实上都支持的值然后指望它不崩。
+        self.sampleCount = device.supportsTextureSampleCount(4) ? 4 : 1
+
+        guard let pipeline = Self.makePipelineState(device: device, sampleCount: sampleCount) else {
+            return nil
+        }
         self.pipelineState = pipeline
 
         // 深度测试开着：off-axis 投影在视差预算的边界附近，近处顶点在屏幕空间
@@ -293,7 +312,12 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
 
     /// 顶点函数用 `[[vertex_id]]` + 手动读取的 `constant` 缓冲，不用
     /// `[[stage_in]]` 顶点属性描述——所以这里不需要 `MTLVertexDescriptor`。
-    private static func makePipelineState(device: MTLDevice) -> MTLRenderPipelineState? {
+    ///
+    /// `rasterSampleCount` 必须与渲染时实际使用的颜色/深度附件的样本数一致
+    /// （即 `MTKView.sampleCount`），否则 `makeRenderCommandEncoder` 在运行时
+    /// 直接崩溃——两边的样本数统一来自 `init?` 里算好的 `self.sampleCount`，
+    /// 这个函数只管照单全收，不重新决定"用不用 MSAA"。
+    private static func makePipelineState(device: MTLDevice, sampleCount: Int) -> MTLRenderPipelineState? {
         guard let library = device.makeDefaultLibrary(),
               let vertexFunction = library.makeFunction(name: "parallaxVertex"),
               let fragmentFunction = library.makeFunction(name: "parallaxFragment")
@@ -304,6 +328,7 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
         descriptor.fragmentFunction = fragmentFunction
         descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
         descriptor.depthAttachmentPixelFormat = depthPixelFormat
+        descriptor.rasterSampleCount = sampleCount
 
         return try? device.makeRenderPipelineState(descriptor: descriptor)
     }
@@ -322,11 +347,20 @@ final class ParallaxRenderer: NSObject, MTKViewDelegate {
         else { return }
 
         let projection = OffAxisProjection.matrix(eye: eye, screen: screen, near: Self.near, far: Self.far)
+
+        // 内容宽高比从当前纹理的实际像素宽高算——程序化素材（256×256，方形）
+        // 与真实照片（HEIC 常见 3:4 或 4:3）都用这同一行，换素材（updateScene）
+        // 后下一帧 draw(in:) 自然读到新纹理的宽高，不需要额外的「换图重算」钩子。
+        let contentAspect = Float(colorTexture.width) / Float(colorTexture.height)
+        // fill：内容尺寸可能大于屏幕物理尺寸，溢出部分由 OffAxisProjection 的
+        // 视锥（仍然按 screen 本身的物理尺寸算，见上面这行）自动裁掉——
+        // 详见 ContentFitting 类型注释「为什么是 fill 而不是 fit」。
+        let fillSize = ContentFitting.fillSize(contentAspect: contentAspect, screen: screen)
         var uniforms = Uniforms(
             projection: projection,
             parallaxScale: parallaxScale,
             zeroParallax: zeroParallax,
-            screenSize: SIMD2(screen.width, screen.height)
+            screenSize: fillSize
         )
 
         encoder.setRenderPipelineState(pipelineState)

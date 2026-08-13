@@ -57,22 +57,30 @@ struct ParallaxView: View {
             .padding(.trailing, 12)
             .accessibilityLabel("选照片")
         }
-        // 加载失败的可行动提示（简报要求：不是「加载失败」，而是解释原因 +
-        // 给出下一步）。与顶部 statusText 分开放：statusText 每帧刷新，
-        // 错误提示放在这里才不会被下一次 tick() 瞬间盖掉。
+        // 底部叠层：加载失败提示（若有）+ 视差参数滑块，合并进同一个 VStack
+        // 而不是各开一个 `.overlay(alignment: .bottom)`——两个 bottom overlay
+        // 会在同一个位置各自居中叠放，提示条一出现就会跟滑块条重叠。放进
+        // 同一个 VStack 让提示条自然显示在滑块条上方，互不遮挡。
+        //
+        // 加载失败提示与顶部 statusText 分开放：statusText 每帧刷新，
+        // 错误提示放在这里才不会被下一次 tick() 瞬间盖掉（简报要求：不是
+        // 「加载失败」，而是解释原因 + 给出下一步）。
         .overlay(alignment: .bottom) {
-            if let message = poseController.photoLoadMessage {
-                Text(message)
-                    .font(.system(.footnote))
-                    .multilineTextAlignment(.center)
-                    .padding(12)
-                    .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 10))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 32)
-                    .onTapGesture { poseController.dismissPhotoLoadMessage() }
-                    .transition(.opacity)
+            VStack(spacing: 12) {
+                if let message = poseController.photoLoadMessage {
+                    Text(message)
+                        .font(.system(.footnote))
+                        .multilineTextAlignment(.center)
+                        .padding(12)
+                        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 10))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 24)
+                        .onTapGesture { poseController.dismissPhotoLoadMessage() }
+                        .transition(.opacity)
+                }
+                ParallaxControlsBar(poseController: poseController)
             }
+            .padding(.bottom, 28)
         }
         .sheet(isPresented: $showingPicker) {
             PhotoPicker(
@@ -93,6 +101,51 @@ struct ParallaxView: View {
             pointer.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
         }
         return DeviceProfileRegistry.profile(for: identifier)
+    }
+}
+
+/// 真机验收用的参数滑块条：视差强度 + 零视差面。两个都是「肉眼参数」——
+/// 合适的值取决于具体照片和个人对空间感的取舍，不该在代码里硬编一个猜的
+/// 数字，而是让滑块和数值同时露出来，边看画面边拖，当场就能定下来。
+///
+/// 用 `@Bindable` 而不是手搓 `Binding(get:set:)`：`PoseController` 已经是
+/// `@Observable`，`@Bindable` 直接从它的属性生成双向绑定，滑块拖动与数值
+/// 文字会一起刷新——手搓的 get/set 闭包也能让 Slider 本身动起来，但旁边
+/// 那行文字不保证跟着重绘（它不经过 Observation 的访问追踪）。
+private struct ParallaxControlsBar: View {
+    @Bindable var poseController: PoseController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            row(
+                title: "视差强度",
+                valueText: String(format: "%.3f", poseController.parallaxScale),
+                value: $poseController.parallaxScale,
+                range: 0.005...0.20
+            )
+            row(
+                title: "零视差面",
+                valueText: String(format: "%.2f", poseController.zeroParallax),
+                value: $poseController.zeroParallax,
+                range: 0...1
+            )
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 20)
+    }
+
+    private func row(
+        title: String, valueText: String, value: Binding<Float>, range: ClosedRange<Float>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("\(title) \(valueText)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.white)
+            Slider(value: value, in: range)
+                .tint(.white)
+        }
     }
 }
 
@@ -143,7 +196,35 @@ final class PoseController: NSObject, ARSessionDelegate {
 
     /// 渲染器由 `MetalViewRepresentable.Coordinator` 强持有，这里只弱引用，
     /// 避免两边互相持有造成的生命周期纠缠——本对象不需要让 renderer 活着。
-    weak var renderer: ParallaxRenderer?
+    weak var renderer: ParallaxRenderer? {
+        didSet {
+            // renderer 是真机验收时才第一次出现的（`makeUIView` 建好 MTKView
+            // 才会赋值），赋值这一刻把当前滑块状态同步过去一次——否则如果
+            // 这两处默认值以后不小心分叉（比如只改了这里没改渲染器初值，
+            // 或反过来），画面初始效果会和滑块显示的数字对不上。
+            renderer?.parallaxScale = parallaxScale
+            renderer?.zeroParallax = zeroParallax
+        }
+    }
+
+    /// 视差强度滑块的当前值，真机验收用（简报 Step 1：幅度太小看不出空间感，
+    /// 与其猜一个新的固定值，不如让用户当场拖到合适为止）。范围
+    /// `0.005...0.20`：下限保留"几乎关掉视差"的对照组，上限是 `ParallaxBudget`
+    /// 允许的位移量级、再往上画面会碎裂成噪声，滑再远也没有意义。
+    /// 默认值须与 `ParallaxRenderer.parallaxScale` 的初值一致，见 `renderer` 的
+    /// `didSet`——那里负责把"默认值一致"这条假设真正落到实处，而不是两边
+    /// 各自硬编码却指望它们碰巧相等。
+    var parallaxScale: Float = 0.06 {
+        didSet { renderer?.parallaxScale = parallaxScale }
+    }
+
+    /// 零视差面滑块（简报「顺便」要求）：哪一层深度贴在屏幕平面上，直接决定
+    /// 「伸出屏幕」还是「陷进屏幕」的观感占比，跟 parallaxScale 一样是需要
+    /// 现场调的艺术参数，不是能提前猜准的常数。范围 `0...1` 对应
+    /// `DepthMap` 的完整值域。
+    var zeroParallax: Float = 0.5 {
+        didSet { renderer?.zeroParallax = zeroParallax }
+    }
 
     private let session = ARSession()
     private var eyeFilter = OneEuroFilter3()
@@ -453,6 +534,11 @@ struct MetalViewRepresentable: UIViewRepresentable {
         guard let renderer = ParallaxRenderer(device: device, screen: poseController.screen) else {
             return view
         }
+        // MTKView 自己的多重采样样本数必须和 renderer 建 pipeline 时用的
+        // rasterSampleCount 一致（都来自 renderer.sampleCount 这同一个来源），
+        // 否则 draw(in:) 第一次创建 render command encoder 就会崩——
+        // 这一行漏掉，4x MSAA 不是"没效果"而是直接不能跑。
+        view.sampleCount = renderer.sampleCount
         // Coordinator 强持有渲染器——MTKView.delegate 是 weak，
         // PoseController 对渲染器的引用也是 weak，总要有一边真正拥有它。
         context.coordinator.renderer = renderer
