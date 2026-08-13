@@ -483,16 +483,18 @@ final class PoseController: NSObject, ARSessionDelegate {
 
         // Task 3：渲染器已经能换素材了，这里把 loadPhoto(from:) 存好的结果
         // 推过去。放在 tick() 而不是加载完成的那一刻直接推，是因为 Task 2
-        // 提交时渲染器还没有 updateScene(color:depth:) 这个方法——两次提交
-        // 各自都要能独立编译通过，所以中转槽位（pendingPhoto）先于消费它的
-        // 代码落地。推送后立刻清空，不然每帧都重新上传一遍纹理。
+        // 提交时渲染器还没有 updateScene(color:depth:mask:) 这个方法——每次
+        // 提交各自都要能独立编译通过，所以中转槽位（pendingPhoto）先于消费它
+        // 的代码落地。推送后立刻清空，不然每帧都重新上传一遍纹理。
         if let photo = pendingPhoto {
             pendingPhoto = nil
             // updateScene 失败（纹理创建失败）此前只 print，用户只看到"选了照片但
             // 画面没变"、没有任何解释（Plan 3 progress.md 记录的已知风险 ③）。
             // renderer 为 nil 时（渲染器还没接好）不算这次失败，视为成功放过——
             // 那是另一层生命周期时序问题，不在这次要修的范围内。
-            let succeeded = renderer?.updateScene(color: photo.color, depth: photo.depth) ?? true
+            // Plan 4 Task 4：photo.mask 是 nil 时渲染器自己退回单层，这里不用
+            // 分支处理。
+            let succeeded = renderer?.updateScene(color: photo.color, depth: photo.depth, mask: photo.mask) ?? true
             if !succeeded {
                 photoLoadMessage = "这张照片解码成功，但显示失败，请重试"
             }

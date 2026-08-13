@@ -19,6 +19,16 @@ struct VertexOut {
     float2 uv;
 };
 
+// ⚠️ Plan 4 两层渲染的前提：颜色、深度、遮罩三张纹理必须共用同一套 UV
+// 采样约定，否则三者网格对不齐，表现为"遮罩比人物偏了一点"——看得见却
+// 说不清的错误（ParallaxCore 的 MaskResampling 类型注释原话）。
+// 这里的 sampler 是 pixel-center（隐式，Metal `sampler` 的默认行为）+
+// clamp_to_edge，跟 ParallaxCore 侧 MaskResampling 用的 pixel-center 对齐
+// 公式 `(index+0.5)*scale-0.5` 是同一套约定。本文件的 parallaxVertex（采样
+// depthTex）、parallaxFragment（采样 colorTex）、parallaxFragmentMasked
+// （采样 colorTex 与 maskTex）三个函数各自新建 sampler 实例，但用的都是这
+// 同一组 (filter::linear, address::clamp_to_edge) 参数——没有任何一处偏离。
+//
 // 网格顶点按深度图位移：深度大（近）的顶点朝观察者凸出。
 // 位移量 z = (d − zeroParallax) * parallaxScale，与 spec 术语表一致。
 vertex VertexOut parallaxVertex(uint vid [[vertex_id]],
@@ -46,9 +56,45 @@ vertex VertexOut parallaxVertex(uint vid [[vertex_id]],
     return out;
 }
 
+// 单层路径 / 两层模式的背景层：正常采样，不 discard、alpha 恒为 1
+// （`.rgba8Unorm`/`.bgra8Unorm` 的 alpha 通道本就固定不透明，见
+// ParallaxRenderer.rgba8Pixels 的字节序注释）——`ParallaxRenderer` 建这条
+// 管线时没开混合，这里返回的 alpha 分量实际上不参与合成。
 fragment float4 parallaxFragment(VertexOut in [[stage_in]],
                                  texture2d<float> colorTex [[texture(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     return colorTex.sample(s, in.uv);
+}
+
+// 两层模式的前景层专用：遮罩控制 discard + 边缘羽化。
+//
+// kMaskLow/kMaskHigh 定义一条窄的过渡带：原始遮罩值低于 kMaskLow 的片元
+// 整个丢弃（discard_fragment()——不写颜色也不写深度，已经画好的背景层原样
+// 透出）；落在 [kMaskLow, kMaskHigh] 之间的用 smoothstep 算一个渐变 alpha，
+// 与 ParallaxRenderer 开的 source-over 混合一起，跟背景层做柔和过渡；
+// 高于 kMaskHigh 的 alpha 钳到 1，等价于完全不透明。没有这条过渡带，遮罩
+// 从 0 跳到 1 那一圈会是硬边剪影——跟本计划要根治的锯齿是同一种"边缘生硬"
+// 的视觉症状，只是成因不同（那是几何，这是遮罩边缘本身没有过渡）。
+//
+// 阈值是没有断言能验证的肉眼参数，跟 ParallaxRenderer.parallaxScale /
+// zeroParallax 同一类——±0.08 是起点，真机如果觉得边缘发糊或者还留着硬边，
+// 调这两个常量，不用改结构。跟 BackgroundInpainting.fill 的默认
+// threshold=0.5（ParallaxRenderer.maskHoleThreshold）保持中心对齐：CPU 侧
+// "从这个值起视为洞"与 GPU 侧"从这个值起开始显现"是同一条边界。
+constant float kMaskLow = 0.42;
+constant float kMaskHigh = 0.58;
+
+fragment float4 parallaxFragmentMasked(VertexOut in [[stage_in]],
+                                       texture2d<float> colorTex [[texture(0)]],
+                                       texture2d<float> maskTex [[texture(1)]])
+{
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float m = maskTex.sample(s, in.uv).r;
+    if (m < kMaskLow) {
+        discard_fragment();
+    }
+    float alpha = smoothstep(kMaskLow, kMaskHigh, m);
+    float4 color = colorTex.sample(s, in.uv);
+    return float4(color.rgb, alpha);
 }
